@@ -45,6 +45,8 @@
         "multicore.h": "c",
         "bus_ctrl.h": "c",
         "tmds_encode_font_2bpp.h": "c",
-        "sync.h": "c"
+        "sync.h": "c",
+        "dvi_serialiser.h": "c",
+        "sprite.h": "c"
     }
 }

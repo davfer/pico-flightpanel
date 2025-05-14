@@ -56,7 +56,6 @@ target_link_libraries(pico-flightpanel2
 	    pico_util
         tinyusb_device 
         tinyusb_board
-        
         libdvi
         libsprite)
 
