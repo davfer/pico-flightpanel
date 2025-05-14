@@ -37,9 +37,7 @@ pico_sdk_init()
 
 add_executable(pico-flightpanel2 
     pico-flightpanel2.c 
-    usb_descriptors.c
-    tmds_encode_font_2bpp.S
-	tmds_encode_font_2bpp.h)
+    usb_descriptors.c)
 
 pico_set_program_name(pico-flightpanel2 "pico-flightpanel2")
 pico_set_program_version(pico-flightpanel2 "0.1")
