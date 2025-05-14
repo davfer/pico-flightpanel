@@ -54,6 +54,7 @@ target_link_libraries(pico-flightpanel2
         pico_unique_id 
         pico_multicore
 	    pico_util
+        hardware_i2c
         tinyusb_device 
         tinyusb_board
         libdvi
