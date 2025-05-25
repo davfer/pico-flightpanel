@@ -1,4 +1,3 @@
-
 // DVI
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +30,11 @@ uint16_t framebuf[FRAME_WIDTH * FRAME_HEIGHT];
 #include "bsp/board.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
+
+// I2C
+#include "pico/stdlib.h"
+#include "pico/binary_info.h"
+#include "hardware/i2c.h"
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -121,6 +125,13 @@ int main()
         board_init_after_tusb();
     }
 
+    // I2C
+    i2c_init(i2c_default, 100 * 1000);
+    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
+    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+
     while (true)
     {
         tud_task();
@@ -137,6 +148,7 @@ void core1_upkeep()
     // Tasks to be performed on core 1:
     // - Blinking LED
     // - Power LEDs
+    // - PWM of backlight
 
     led_blinking_task();
     
