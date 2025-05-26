@@ -14,18 +14,31 @@
 #include "dvi_serialiser.h"
 #include "common_dvi_pin_configs.h"
 #include "sprite.h"
+#include "inconsola.c"
 
 
 // DVDD 1.2V (1.1V seems ok too)
-#define SCREEN_WIDTH 320
-#define SCREEN_HEIGHT 240
-#define FRAME_WIDTH 320
-#define FRAME_HEIGHT 240
+#define SCREEN_WIDTH 640
+#define SCREEN_HEIGHT 480
 #define VREG_VSEL VREG_VOLTAGE_1_20
 #define DVI_TIMING dvi_timing_640x480p_60hz
 
+#define CHAR_WIDTH 24
+#define CHAR_HEIGHT 32
+#define CHAR_COLS 24
+#define CHAR_ROWS 14
+#define SCREEN_MARGIN_X 8
+#define SCREEN_MARGIN_Y 8
+#define CHAR_MARGIN_X 2
+#define CHAR_MARGIN_Y 2
+#define FONT_HEADER_SIZE 4
+
 struct dvi_inst dvi0;
-uint16_t framebuf[FRAME_WIDTH * FRAME_HEIGHT];
+
+// Grid struct {char, color, type} for each character in the grid
+uint8_t grid_char[CHAR_COLS * CHAR_ROWS];
+uint8_t grid_color[CHAR_COLS * CHAR_ROWS];
+uint8_t grid_type[CHAR_COLS * CHAR_ROWS];
 
 // USB
 #include <stdio.h>
@@ -55,6 +68,64 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
+// Returns an array of 16bit bpp values representing a char [0-CHAR_WIDTH]
+// Pre: c is a valid ASCII character and y < CHAR_HEIGHT
+uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
+    const char char_width = Inconsola[0];
+
+    uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
+    for (uint x = 0; x < char_width; x++) {
+
+        // Calculate the pixel value from the font data
+        // Inconsola is a CHAR_WIDTH x CHAR_HEIGHT font
+        // Font has a header that specifies the width and height of each character
+        // Calculate the index in the font data (start font data) + (first pos of char) + (x pos in char) + (y pos in char)
+        uint char_index = (FONT_HEADER_SIZE) +  ((c - 0x20) * char_width * CHAR_HEIGHT) + x + (y * char_width);
+        uint8_t val = Inconsola[char_index];
+
+        // Store the pixel value in the buffer
+        uint8_t pos = (y * char_width) + x;
+        if (val == 1) {
+            char_buffer[pos] = fg;
+        } else {
+            char_buffer[pos] = 0x0000;
+        }
+    }
+    return char_buffer;
+    
+}
+
+// Returns an array of 16bit bpp values representing a scanline SCREEN_WIDTH for the DVI output.
+// Pre: y < SCREEN_HEIGHT
+uint16_t* compute_scanline(uint y) {
+    static uint16_t scanline_buffer[SCREEN_WIDTH];
+
+    uint16_t* buffer;
+    for (uint x = 0; x < SCREEN_WIDTH; x++) {
+        scanline_buffer[x] = 0xFF00; 
+
+        // compute row/col of the char grid based on x and y if not out of grid
+        if (x >= CHAR_COLS * CHAR_WIDTH || y >= CHAR_ROWS * CHAR_HEIGHT) {
+            scanline_buffer[x] = 0x0000;
+            continue;
+        }
+        uint16_t char_pos = (x / CHAR_WIDTH) + ((y / CHAR_HEIGHT) * CHAR_COLS);
+
+        buffer = compute_char_scanline(y, grid_char[char_pos], grid_color[char_pos], grid_type[char_pos]);
+        for (uint i = 0; i < CHAR_WIDTH; i++) {
+            if (x >= SCREEN_WIDTH) {
+                continue;
+            }
+            scanline_buffer[x] = buffer[i];
+            x++;
+        }
+    }
+    return scanline_buffer;
+}
+
+
+//--------------------------------------------------------------------+
+
 void core1_main() {
 	dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
 	dvi_start(&dvi0);
@@ -69,9 +140,9 @@ void core1_scanline_callback() {
 		;
 	// // Note first two scanlines are pushed before DVI start
 	static uint scanline = 2;
-	bufptr = &framebuf[FRAME_WIDTH * scanline];
+	bufptr = compute_scanline(scanline);
 	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-	scanline = (scanline + 1) % FRAME_HEIGHT;
+	scanline = (scanline + 1) % SCREEN_HEIGHT;
 }
 
 int main() {
@@ -87,13 +158,13 @@ int main() {
 	dvi0.scanline_callback = core1_scanline_callback;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
-    // Once we've given core 1 the framebuffer, it will just keep on displaying
-	// it without any intervention from core 0
-	sprite_fill16(framebuf, 0xffff, FRAME_WIDTH * FRAME_HEIGHT);
-	uint16_t *bufptr = framebuf;
-	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-	bufptr += FRAME_WIDTH;
-	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
+    // // Once we've given core 1 the framebuffer, it will just keep on displaying
+	// // it without any intervention from core 0
+	// sprite_fill16(framebuf, 0xffff, FRAME_WIDTH * FRAME_HEIGHT);
+	// uint16_t *bufptr = framebuf;
+	// queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
+	// bufptr += FRAME_WIDTH;
+	// queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
 
 	// Core 1 will wait until it sees the first colour buffer, then start up the
 	// DVI signalling.
@@ -177,17 +248,59 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) report_id;
     (void) report_type;
 
-    uint8_t back[bufsize];
-    
-    sprite_fill16(framebuf, buffer[0] << 8 + buffer[1], FRAME_WIDTH * FRAME_HEIGHT);
-	uint16_t *bufptr = framebuf;
-	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-	bufptr += FRAME_WIDTH;
-	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-    
+    uint8_t back[CFG_TUD_HID_EP_BUFSIZE] = {0};
+    uint8_t errNo = 0;
+    switch (buffer[0]) {
+        case 0x01:
+            if (bufsize < 6) {
+                errNo = 10;
+                break;
+            }
+            if (buffer[1] >= CHAR_COLS || buffer[2] >= CHAR_ROWS) {
+                errNo = 11;
+                break;
+            }
+            if (buffer[3] >= 0x80) {
+                errNo = 12;
+                break;
+            }
+            if (buffer[4] >= 10) {
+                errNo = 13;
+                break;
+            }
+            if (buffer[5] >= 2) {
+                errNo = 14;
+                break;
+            }
 
-    // echo back anything we received from host
-    tud_hid_report(0, back, bufsize);
+            uint8_t pos = buffer[1] + (buffer[2] * CHAR_COLS);
+            grid_char[pos] = buffer[3];
+            grid_color[pos] = buffer[4];
+            grid_type[pos] = buffer[5];
+
+            back[0] = 0; // Success
+            blink_interval_ms = BLINK_MOUNTED;
+            break;
+        default:
+            errNo = 1; // Unknown command
+            break;
+    }
+
+    if (errNo != 0) {
+        blink_interval_ms = BLINK_FAIL;
+        back[0] = 255; // Error
+        back[1] = errNo; // Error Number
+    }
+    
+    
+    // sprite_fill16(framebuf, buffer[0] << 8 + buffer[1], FRAME_WIDTH * FRAME_HEIGHT);
+	// uint16_t *bufptr = framebuf;
+	// queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
+	// bufptr += FRAME_WIDTH;
+	// queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
+    
+    while (!tud_hid_ready()) tud_task();
+    tud_hid_report(0, back, CFG_TUD_HID_EP_BUFSIZE);
 }
 
 //--------------------------------------------------------------------+

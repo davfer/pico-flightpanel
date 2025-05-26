@@ -11,11 +11,21 @@ for vid in  USB_VID:
     for dict in hid.enumerate(vid):
         print(dict)
         dev = hid.Device(dict['vendor_id'], dict['product_id'])
-        if dev:
-           # Send command
-            cmd = [1, 0x10, 0x20, 0x30]  # Report ID 1 + data
-            dev.write(cmd)
+        if dev is not None:
+            print("Found device:", dict['product_string'], "at", dict['path'])
+            print("Vendor ID:", hex(dict['vendor_id']), "Product ID:", hex(dict['product_id']))
 
-            # Read back response (report ID included in first byte)
-            response = dev.read(64, timeout=1000)
-            print("Response:", response)
+            command = bytes([1, 4, 4, ord('c'), 0x00, 0x00])
+            try:
+                dev.write(command)
+                print("Command sent:", command)
+            except Exception as e:
+                print("Error sending command:", e)
+            try:
+                response = dev.read(64) 
+                print("Response received:", response)
+            except Exception as e:
+                print("Error reading response:", e)
+            # Close the device
+            dev.close()
+            print("Device closed.")
