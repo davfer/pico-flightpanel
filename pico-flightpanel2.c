@@ -115,33 +115,33 @@ void led_blinking_task(void);
 
 // Returns an array of 16bit bpp values representing a char [0-CHAR_WIDTH]
 // Pre: c is a valid ASCII character and y < CHAR_HEIGHT
-uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
-    const uint8_t char_width = bigfont.char_width;
-    const uint8_t char_height = bigfont.char_height;
-    const uint8_t first_ascii = bigfont.first_ascii;
-    const uint8_t n_chars = bigfont.n_chars;
-    const uint8_t bytes_per_row = (char_width + 7) / 8;
+// uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
+//     const uint8_t char_width = bigfont.char_width;
+//     const uint8_t char_height = bigfont.char_height;
+//     const uint8_t first_ascii = bigfont.first_ascii;
+//     const uint8_t n_chars = bigfont.n_chars;
+//     const uint8_t bytes_per_row = (char_width + 7) / 8;
 
-    if (c < first_ascii || c >= first_ascii + n_chars || y >= char_height) {
-        return NULL; // invalid character or row
-    }
+//     if (c < first_ascii || c >= first_ascii + n_chars || y >= char_height) {
+//         return NULL; // invalid character or row
+//     }
 
-    uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
-    if (!char_buffer) return NULL;
+//     uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
+//     if (!char_buffer) return NULL;
 
-    uint char_index = c - first_ascii;
-    uint char_offset = (char_index * char_height * bytes_per_row) + (y * bytes_per_row);
+//     uint char_index = c - first_ascii;
+//     uint char_offset = (char_index * char_height * bytes_per_row) + (y * bytes_per_row);
 
-    for (uint x = 0; x < char_width; x++) {
-        uint8_t byte = bigfont.fontdata[char_offset + (x / 8)];
-        uint8_t bit = 7 - (x % 8); // MSB first
-        uint8_t val = (byte >> bit) & 1;
+//     for (uint x = 0; x < char_width; x++) {
+//         uint8_t byte = bigfont.fontdata[char_offset + (x / 8)];
+//         uint8_t bit = 7 - (x % 8); // MSB first
+//         uint8_t val = (byte >> bit) & 1;
 
-        char_buffer[x] = val ? fg : 0x0000;
-    }
+//         char_buffer[x] = val ? fg : 0x0000;
+//     }
 
-    return char_buffer;
-}
+//     return char_buffer;
+// }
 
 // // Returns an array of 16bit bpp values representing a scanline SCREEN_WIDTH for the DVI output.
 // // Pre: y < SCREEN_HEIGHT
@@ -208,31 +208,58 @@ static inline void prepare_scanline(const char *chars, uint y) {
     const uint bytes_per_row = (bigfont.char_width + 7) / 8;
     const uint bytes_per_char = bigfont.char_height * bytes_per_row;
 
+
+
+    // for (uint x = 0; x < FRAME_WIDTH; ++x) {
+    //     const uint pos = x / 8;
+    //     const uint bit = 7 - (x % 8);
+
+    //     if (x < SCREEN_MARGIN_X || x >= FRAME_WIDTH - SCREEN_MARGIN_X) {
+    //         bit_set(&scanbuf[pos], bit, 1);
+    //         continue;
+    //     }
+
+    //     //const uint real_x = x - SCREEN_MARGIN_X;
+    //     //const uint char_col = real_x / bigfont.char_width;
+    //     // if (char_col >= CHAR_COLS) {
+    //     //     bit_set(&scanbuf[pos], bit, 1); // Fill with black
+    //     //     continue;
+    //     // }
+
+    //     // char c = get_grid_char(chars, real_x / bigfont.char_width, char_row);
+    //     // if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?';
+
+    //     // const uint char_index = (c - bigfont.first_ascii);
+    //     // const uint char_x = real_x % bigfont.char_width;
+    //     // const uint font_offset = (char_index * bytes_per_char) + (row_in_char * bytes_per_row) + (char_x / 8);
+    //     // const uint8_t char_byte = bigfont.fontdata[font_offset];
+
+    //     // bit_set(&scanbuf[pos], bit, bit_get(char_byte, 7 - (char_x % 8)));
+    // }
+
+
+	// const uint char_row = y / bigfont.char_height;      // Vertical char row
+	// const uint row_in_char = y % bigfont.char_height;   // Row within a character
+	for (uint i = 0; i < CHAR_COLS; ++i) {  // One character per 24px block
+		if (y >= bigfont.char_height*CHAR_ROWS) {
+			scanbuf[i] = 0;
+			continue;
+		}
+
+		char c = chars[char_row * CHAR_COLS + i];
+		if (c < bigfont.first_ascii || c > bigfont.first_ascii + bigfont.n_chars) c = '?';
+
+		uint glyph_base = (c - bigfont.first_ascii) * bytes_per_char;
+		uint row_offset = row_in_char * bytes_per_row;
+
+		// Copy 3 bytes of this row from the font into scanline
+		for (int b = 0; b < bytes_per_row; ++b) {
+			scanbuf[(i * bytes_per_row) + b] = reverse_byte(bigfont.fontdata[glyph_base + row_offset + b]);
+		}
+	}
+
     for (uint x = 0; x < FRAME_WIDTH; ++x) {
-        const uint pos = x / 8;
-        const uint bit = 7 - (x % 8);
-
-        if (x < SCREEN_MARGIN_X || x >= FRAME_WIDTH - SCREEN_MARGIN_X) {
-            bit_set(&scanbuf[pos], bit, 1);
-            continue;
-        }
-
-        //const uint real_x = x - SCREEN_MARGIN_X;
-        //const uint char_col = real_x / bigfont.char_width;
-        // if (char_col >= CHAR_COLS) {
-        //     bit_set(&scanbuf[pos], bit, 1); // Fill with black
-        //     continue;
-        // }
-
-        // char c = get_grid_char(chars, real_x / bigfont.char_width, char_row);
-        // if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?';
-
-        // const uint char_index = (c - bigfont.first_ascii);
-        // const uint char_x = real_x % bigfont.char_width;
-        // const uint font_offset = (char_index * bytes_per_char) + (row_in_char * bytes_per_row) + (char_x / 8);
-        // const uint8_t char_byte = bigfont.fontdata[font_offset];
-
-        // bit_set(&scanbuf[pos], bit, bit_get(char_byte, 7 - (char_x % 8)));
+        //sleep_us(1);
     }
 
 send_scanline:
@@ -271,21 +298,15 @@ int __not_in_flash("main") main() {
 	set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
 #endif
 
-	setup_default_uart();
-
-	printf("Configuring DVI\n");
-
 	dvi0.timing = &DVI_TIMING;
 	dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
 	dvi0.scanline_callback = core1_scanline_callback;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
-	printf("Prepare first scanline\n");
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
 		grid_char[i] = (i % bigfont.n_chars)+bigfont.first_ascii;
 	prepare_scanline(grid_char, 0);
 
-	printf("Core 1 start\n");
 	sem_init(&dvi_start_sem, 0, 1);
 	hw_set_bits(&bus_ctrl_hw->priority, BUSCTRL_BUS_PRIORITY_PROC1_BITS);
 	multicore_launch_core1(core1_main);

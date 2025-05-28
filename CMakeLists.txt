@@ -54,15 +54,13 @@ target_link_libraries(pico-flightpanel2
 	    pico_util
         tinyusb_device 
         tinyusb_board
-        libdvi
-        libsprite)
+        libdvi)
 
 # Add the standard include files to the build
 target_include_directories(pico-flightpanel2 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 add_subdirectory(libdvi)
-add_subdirectory(libsprite)
 
 set(DVI_DEFAULT_SERIAL_CONFIG "pico_sock_cfg" CACHE STRING
 	"Select a default pin configuration from common_dvi_pin_configs.h")
