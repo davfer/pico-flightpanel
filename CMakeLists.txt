@@ -69,7 +69,9 @@ set(DVI_DEFAULT_SERIAL_CONFIG "pico_sock_cfg" CACHE STRING
 
     target_compile_definitions(pico-flightpanel2 PRIVATE
 	DVI_DEFAULT_SERIAL_CONFIG=${DVI_DEFAULT_SERIAL_CONFIG}
-	PICO_CORE1_STACK_SIZE=0x200
+	DVI_VERTICAL_REPEAT=1
+	DVI_N_TMDS_BUFFERS=3
+	DVI_MONOCHROME_TMDS=1
 	)
 
 pico_add_extra_outputs(pico-flightpanel2)
