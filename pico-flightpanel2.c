@@ -18,41 +18,32 @@
 #include "common_dvi_pin_configs.h"
 #include "tmds_encode.h"
 
-#include "font_24x32.h"
+#include "inconsola.c"
 
-
-// DVDD 1.2V (1.1V seems ok too)
-// #define SCREEN_WIDTH 640
-// #define SCREEN_HEIGHT 480
-// #define FRAME_WIDTH SCREEN_WIDTH
-// #define FRAME_HEIGHT SCREEN_HEIGHT
-// #define VREG_VSEL VREG_VOLTAGE_1_20
-// #define DVI_TIMING dvi_timing_640x480p_60hz
-
-// #define CHAR_WIDTH 24
-// #define CHAR_HEIGHT 32
-// #define CHAR_COLS 24
-// #define CHAR_ROWS 14
-// #define SCREEN_MARGIN_X 8
-// #define SCREEN_MARGIN_Y 8
-// #define CHAR_MARGIN_X 2
-// #define CHAR_MARGIN_Y 2
-// #define FONT_HEADER_SIZE 4
-
-// struct dvi_inst dvi0;
-// uint16_t framebuf[FRAME_WIDTH];
-
-#define FONT_FIRST_ASCII 32
-#define FONT_LAST_ASCII 126
-#define FONT_N_CHARS FONT_LAST_ASCII-FONT_FIRST_ASCII+1 // 32-126
-#define FONT_CHAR_WIDTH 24
-#define FONT_CHAR_HEIGHT 32
-#define BYTES_PER_ROW (FONT_CHAR_WIDTH / 8)  // 3
-#define FONT_BYTES_PER_CHAR (FONT_CHAR_HEIGHT * BYTES_PER_ROW)  // 96
+#define CHAR_WIDTH 24
+#define CHAR_HEIGHT 32
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
-#define CHUNKS_PER_HLINE (FRAME_WIDTH / 8)
+#define SCREEN_MARGIN_X 8
+#define SCREEN_MARGIN_Y 8
+#define CHAR_MARGIN_X 2
+#define CHAR_MARGIN_Y 2
 
+typedef struct {
+    unsigned char char_width; // 24
+    unsigned char char_height; // 32
+    unsigned char first_ascii; // 32
+    unsigned char n_chars; // 95
+    const unsigned char *fontdata;
+} font_t;
+
+const font_t bigfont = {
+    .char_width = Inconsola[0],
+    .char_height = Inconsola[1],
+    .first_ascii = Inconsola[2],
+    .n_chars = Inconsola[3],
+    .fontdata = &Inconsola[4],
+};
 
 // Pick one:
 #define MODE_640x480_60Hz
@@ -71,6 +62,21 @@ struct semaphore dvi_start_sem;
 char grid_char[CHAR_COLS * CHAR_ROWS];
 char grid_color[CHAR_COLS * CHAR_ROWS];
 char grid_type[CHAR_COLS * CHAR_ROWS];
+
+static inline char get_grid_char(const char *chars, uint x, uint y) {
+    if (x >= CHAR_COLS || y >= CHAR_ROWS) return 0;
+    return chars[x + (y * CHAR_COLS)];
+}
+
+static inline void bit_set(uint8_t *byte, uint bit, uint value) {
+    if (value) {
+        *byte |= (1 << bit);
+    } else {
+        *byte &= ~(1 << bit);
+    }
+}
+
+#define bit_get(byte, bit) (((byte) >> (bit)) & 1)
 
 static inline uint8_t reverse_byte(uint8_t b) {
 	b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
@@ -107,29 +113,35 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
-// // Returns an array of 16bit bpp values representing a char [0-CHAR_WIDTH]
-// // Pre: c is a valid ASCII character and y < CHAR_HEIGHT
-// uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
-//     const uint8_t char_width = Inconsola[0];
-//     const uint8_t char_height = Inconsola[1];
-//     const uint8_t bytes_per_row = (char_width + 7) / 8; // 1 byte per 8 pixels (ceiling)
+// Returns an array of 16bit bpp values representing a char [0-CHAR_WIDTH]
+// Pre: c is a valid ASCII character and y < CHAR_HEIGHT
+uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
+    const uint8_t char_width = bigfont.char_width;
+    const uint8_t char_height = bigfont.char_height;
+    const uint8_t first_ascii = bigfont.first_ascii;
+    const uint8_t n_chars = bigfont.n_chars;
+    const uint8_t bytes_per_row = (char_width + 7) / 8;
 
-//     uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
-//     if (!char_buffer) return NULL;
+    if (c < first_ascii || c >= first_ascii + n_chars || y >= char_height) {
+        return NULL; // invalid character or row
+    }
 
-//     // Calculate starting index of this character's bitmap
-//     uint char_offset = FONT_HEADER_SIZE +               // Skip header
-//                        ((c - 0x20) * char_height * bytes_per_row) + // Each char has height rows of bytes (96 bytes per char)
-//                        (y * bytes_per_row);               // Row offset in current char
-//     for (uint x = 0; x < char_width; x++) {
-//         uint8_t byte = Inconsola[char_offset + x / 8];
-//         uint8_t bit = 7 - (x % 8); // MSB first
-//         uint8_t val = (byte >> bit) & 1;
+    uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
+    if (!char_buffer) return NULL;
 
-//         char_buffer[x] = val ? fg : 0x0000;
-//     }
-//     return char_buffer;
-// }
+    uint char_index = c - first_ascii;
+    uint char_offset = (char_index * char_height * bytes_per_row) + (y * bytes_per_row);
+
+    for (uint x = 0; x < char_width; x++) {
+        uint8_t byte = bigfont.fontdata[char_offset + (x / 8)];
+        uint8_t bit = 7 - (x % 8); // MSB first
+        uint8_t val = (byte >> bit) & 1;
+
+        char_buffer[x] = val ? fg : 0x0000;
+    }
+
+    return char_buffer;
+}
 
 // // Returns an array of 16bit bpp values representing a scanline SCREEN_WIDTH for the DVI output.
 // // Pre: y < SCREEN_HEIGHT
@@ -171,86 +183,63 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
-// void core1_main() {
-// 	dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
-// 	dvi_start(&dvi0);
-// 	dvi_scanbuf_main_16bpp(&dvi0);
-// 	__builtin_unreachable();
-// }
-
-// void core1_scanline_callback() {
-// 	// // Discard any scanline pointers passed back
-// 	// uint16_t *bufptr;
-// 	// while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
-// 	// 	;
-// 	// // // Note first two scanlines are pushed before DVI start
-// 	// static uint scanline = 2;
-// 	// // bufptr = compute_scanline(scanline);
-//     // for (uint i = 0; i < SCREEN_WIDTH; i++) {
-//     //     bufptr[i] = 0xFF00;
-//     // }
-// 	// queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-// 	// scanline = (scanline + 1) % SCREEN_HEIGHT;
-// }
-
 static inline void prepare_scanline(const char *chars, uint y) {
-	// static uint8_t scanbuf[CHUNKS_PER_HLINE]; // scanbuf is 8bit to fill all the width of the screen
-	// // First blit font into 1bpp scanline buffer, then encode scanbuf into tmdsbuf
-	// for (uint i = 0; i < CHUNKS_PER_HLINE; ++i) {
-	// 	//uint c = chars[(i / BYTES_PER_CHAR) + ((y / FONT_CHAR_HEIGHT) * CHAR_COLS)]; // virtual 2d array [i][j] -> [i + j * CHAR_COLS]
-	// 	// c contains the ASCII code of the character to be displayed, while y is 0-7 it results in 0 added offset in j
+    #define CHUNKS_PER_SCANLINE (FRAME_WIDTH / 8)
+    static uint8_t scanbuf[CHUNKS_PER_SCANLINE];
+    for (uint x = 0; x < CHUNKS_PER_SCANLINE; ++x) {
+        scanbuf[x] = 0x00; // Clear the scanline buffer
+    }
 
-	// 	// Y POS = ((c - FONT_FIRST_ASCII) * FONT_BYTES_PER_CHAR) -> [first, last char]
-	// 	// FONT-CHUNK base pos [0 - 95 char byte] defines Y 0-32
-	// 	// FONT-CHUNK 3byte offset = i%3
-	// 	uint c = chars[65-32];
-	// 	// uint pos = ((c - FONT_FIRST_ASCII) * FONT_BYTES_PER_CHAR) + ((y % FONT_CHAR_HEIGHT) * BYTES_PER_CHAR) + (i % BYTES_PER_CHAR);
+    // Top and bottom margins
+    if (y < SCREEN_MARGIN_Y || y >= FRAME_HEIGHT - SCREEN_MARGIN_Y) {
+        for (uint x = 0; x < CHUNKS_PER_SCANLINE; ++x) {
+            scanbuf[x] = 0xFF; // Fill with white
+        }
+        goto send_scanline;
+    }
 
-	// 	uint pos = ((c - FONT_FIRST_ASCII) * FONT_BYTES_PER_CHAR) 
-	// 			+ ((y % FONT_CHAR_HEIGHT) * BYTES_PER_CHAR) // row offset
-	// 			+ (i % BYTES_PER_CHAR); // byte within the row
+    const uint real_y = y - SCREEN_MARGIN_Y;
+    const uint char_row = real_y / bigfont.char_height;
+    if (char_row >= CHAR_ROWS) {
+        goto send_scanline; 
+    }
 
-	// 	scanbuf[i] = font_24x32[pos];
-	// }
+    const uint row_in_char = real_y % bigfont.char_height;
+    const uint bytes_per_row = (bigfont.char_width + 7) / 8;
+    const uint bytes_per_char = bigfont.char_height * bytes_per_row;
 
-	// char A[] = {0x00,0x20,0x00,0x00,0x30,0x00,0x00,0x30,0x00,0x00,0x30,0x00,0x00,0x78,0x00,0x00,0x78,0x00,0x00,0x78,0x00,0x00,0xFC,0x00,0x00,0xCC,0x00,0x00,0xCE,0x00,0x01,0x86,0x00,0x01,0x86,0x00,0x01,0x87,0x00,0x03,0x03,0x00,0x03,0x03,0x80,0x03,0xFF,0x80,0x07,0xFF,0x80,0x06,0x01,0xC0,0x0E,0x01,0xC0,0x0E,0x00,0xC0,0x0C,0x00,0xE0,0x1C,0x00,0xE0,0x1C,0x00,0x70,0x18,0x00,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
-	// for (uint i = 0; i < 3; ++i) {
-	// 	uint pos = i + ((y % FONT_CHAR_HEIGHT) * BYTES_PER_CHAR);
-	// 	scanbuf[i] = A[pos];
-	// }
+    for (uint x = 0; x < FRAME_WIDTH; ++x) {
+        const uint pos = x / 8;
+        const uint bit = 7 - (x % 8);
 
-	static uint8_t scanbuf[CHUNKS_PER_HLINE];
-	const uint char_row = y / FONT_CHAR_HEIGHT;      // Vertical char row
-	const uint row_in_char = y % FONT_CHAR_HEIGHT;   // Row within a character
+        if (x < SCREEN_MARGIN_X || x >= FRAME_WIDTH - SCREEN_MARGIN_X) {
+            bit_set(&scanbuf[pos], bit, 1);
+            continue;
+        }
 
-	#define MARGIN_LEFT_BYTES 1
-	for (uint i = 0; i < CHAR_COLS; ++i) {  // One character per 24px block
-		if (y >= FONT_CHAR_HEIGHT*CHAR_ROWS) {
-			scanbuf[i] = 0;
-			continue;
-		}
+        //const uint real_x = x - SCREEN_MARGIN_X;
+        //const uint char_col = real_x / bigfont.char_width;
+        // if (char_col >= CHAR_COLS) {
+        //     bit_set(&scanbuf[pos], bit, 1); // Fill with black
+        //     continue;
+        // }
 
-		char c = chars[char_row * CHAR_COLS + i];
-		if (c < FONT_FIRST_ASCII || c > FONT_LAST_ASCII) c = '?';
+        // char c = get_grid_char(chars, real_x / bigfont.char_width, char_row);
+        // if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?';
 
-		uint glyph_base = (c - FONT_FIRST_ASCII) * FONT_BYTES_PER_CHAR;
-		uint row_offset = row_in_char * BYTES_PER_ROW;
+        // const uint char_index = (c - bigfont.first_ascii);
+        // const uint char_x = real_x % bigfont.char_width;
+        // const uint font_offset = (char_index * bytes_per_char) + (row_in_char * bytes_per_row) + (char_x / 8);
+        // const uint8_t char_byte = bigfont.fontdata[font_offset];
 
-		// Copy 3 bytes of this row from the font into scanline
-		for (int b = 0; b < BYTES_PER_ROW; ++b) {
-			scanbuf[(i * BYTES_PER_ROW) + b + MARGIN_LEFT_BYTES] = reverse_byte(font_24x32[glyph_base + row_offset + b]);
-		}
-	}
+        // bit_set(&scanbuf[pos], bit, bit_get(char_byte, 7 - (char_x % 8)));
+    }
 
-	// Zero-fill any remaining scanbuf
-	for (uint i = CHAR_COLS * BYTES_PER_ROW; i < CHUNKS_PER_HLINE; ++i) {
-		scanbuf[i] = 0;
-	}
-
-	uint32_t *tmdsbuf;
-	queue_remove_blocking(&dvi0.q_tmds_free, &tmdsbuf);
-	tmds_encode_1bpp((const uint32_t*)scanbuf, tmdsbuf, FRAME_WIDTH);
-	queue_add_blocking(&dvi0.q_tmds_valid, &tmdsbuf);
+send_scanline:
+    uint32_t *tmdsbuf;
+    queue_remove_blocking(&dvi0.q_tmds_free, &tmdsbuf);
+    tmds_encode_1bpp((const uint32_t*)scanbuf, tmdsbuf, FRAME_WIDTH);
+    queue_add_blocking(&dvi0.q_tmds_valid, &tmdsbuf);
 }
 
 void core1_scanline_callback() {
@@ -293,7 +282,7 @@ int __not_in_flash("main") main() {
 
 	printf("Prepare first scanline\n");
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
-		grid_char[i] = (i % FONT_N_CHARS)+FONT_FIRST_ASCII;
+		grid_char[i] = (i % bigfont.n_chars)+bigfont.first_ascii;
 	prepare_scanline(grid_char, 0);
 
 	printf("Core 1 start\n");

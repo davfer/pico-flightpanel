@@ -47,6 +47,9 @@
         "tmds_encode_font_2bpp.h": "c",
         "sync.h": "c",
         "dvi_serialiser.h": "c",
-        "sprite.h": "c"
-    }
+        "sprite.h": "c",
+        "font_24x32.h": "c",
+        "random": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }
