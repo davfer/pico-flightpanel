@@ -11,7 +11,7 @@
 #include "hardware/vreg.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/dma.h"
-#include "pico/sem.h"
+#include "pico/sync.h"
 
 #include "dvi.h"
 #include "dvi_serialiser.h"
@@ -20,8 +20,6 @@
 
 #include "inconsola.c"
 
-#define CHAR_WIDTH 24
-#define CHAR_HEIGHT 32
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
 #define SCREEN_MARGIN_X 8
@@ -53,37 +51,18 @@ const font_t bigfont = {
 #define VREG_VSEL VREG_VOLTAGE_1_20
 #define DVI_TIMING dvi_timing_640x480p_60hz
 
-#define LED_PIN 16
-
 struct dvi_inst dvi0;
 struct semaphore dvi_start_sem;
+struct mutex copying_sem;
 
 // Grid struct {char, color, type} for each character in the grid
 char grid_char[CHAR_COLS * CHAR_ROWS];
 char grid_color[CHAR_COLS * CHAR_ROWS];
 char grid_type[CHAR_COLS * CHAR_ROWS];
+uint8_t framebuf[(FRAME_WIDTH / 8) * FRAME_HEIGHT]; // 1bpp framebuffer for the DVI output
+uint8_t renderbuf[(FRAME_WIDTH / 8) * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
+uint8_t renderrequest = 0; // Flag to indicate a render request
 
-static inline char get_grid_char(const char *chars, uint x, uint y) {
-    if (x >= CHAR_COLS || y >= CHAR_ROWS) return 0;
-    return chars[x + (y * CHAR_COLS)];
-}
-
-static inline void bit_set(uint8_t *byte, uint bit, uint value) {
-    if (value) {
-        *byte |= (1 << bit);
-    } else {
-        *byte &= ~(1 << bit);
-    }
-}
-
-#define bit_get(byte, bit) (((byte) >> (bit)) & 1)
-
-static inline uint8_t reverse_byte(uint8_t b) {
-	b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
-	b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
-	b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
-	return b;
-}
 
 // USB
 #include <stdio.h>
@@ -183,86 +162,68 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
-static inline void prepare_scanline(const char *chars, uint y) {
+static inline void compute_char(uint dest_x, uint dest_y, char c) {
+    uint char_index = c - bigfont.first_ascii;
+    uint bytes_per_row = (bigfont.char_width + 7) / 8;
+    for (uint y = 0; y < bigfont.char_height; ++y) {
+        const uint framebuf_posy = (dest_y + y) * (FRAME_WIDTH / 8);
+
+        for (uint x = 0; x < bigfont.char_width; ++x) {
+            const uint framebuf_posx = dest_x + x;
+            const uint framebuf_pos = framebuf_posy + (framebuf_posx / 8);
+            const uint framebuf_bit = 7 - (framebuf_posx % 8);
+                        
+            uint char_offset = (char_index * bigfont.char_height * bytes_per_row) + (y * bytes_per_row);
+            uint8_t font_byte = bigfont.fontdata[char_offset + (x / 8)];
+            uint8_t bit = x % 8;
+            uint8_t pix = (font_byte >> bit) & 1;
+
+            if (pix == 0) {
+                framebuf[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+            } else {
+                framebuf[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+            }
+        }
+    }
+}
+
+
+static inline void compute_render() {
+    mutex_enter_blocking(&copying_sem);
+
+    // clear the frame buffer
+    for (uint i = 0; i < (FRAME_WIDTH / 8) * FRAME_HEIGHT; ++i) {
+        framebuf[i] = 0; // Clear the frame buffer
+    }
+
+    // Fill the frame buffer with characters from the grid
+    for (uint grid_y = 0; grid_y < CHAR_ROWS; grid_y++) {
+        for (uint grid_x = 0; grid_x < CHAR_COLS; grid_x++) {
+            uint16_t char_pos = grid_x + (grid_y * CHAR_COLS);
+            char c = grid_char[char_pos];
+            if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?'; // Invalid character, use space
+
+            uint16_t charpos_x = (grid_x * bigfont.char_width) + (grid_x * CHAR_MARGIN_X) + SCREEN_MARGIN_X; //  
+            uint16_t charpos_y = (grid_y * bigfont.char_height);
+
+            compute_char(charpos_x, charpos_y, c);
+        }
+    }
+    
+    mutex_exit(&copying_sem);
+    renderrequest = 1; // Set render request flag
+    sleep_ms(10); // Give some time for the render to be processed
+}
+
+static inline void prepare_scanline(uint y) {
     #define CHUNKS_PER_SCANLINE (FRAME_WIDTH / 8)
     static uint8_t scanbuf[CHUNKS_PER_SCANLINE];
+    const uint16_t ypos = y * CHUNKS_PER_SCANLINE;
+
     for (uint x = 0; x < CHUNKS_PER_SCANLINE; ++x) {
-        scanbuf[x] = 0x00; // Clear the scanline buffer
+        scanbuf[x] = renderbuf[ypos + x]; // Clear the scanline buffer
     }
-
-    // Top and bottom margins
-    if (y < SCREEN_MARGIN_Y || y >= FRAME_HEIGHT - SCREEN_MARGIN_Y) {
-        for (uint x = 0; x < CHUNKS_PER_SCANLINE; ++x) {
-            scanbuf[x] = 0xFF; // Fill with white
-        }
-        goto send_scanline;
-    }
-
-    const uint real_y = y - SCREEN_MARGIN_Y;
-    const uint char_row = real_y / bigfont.char_height;
-    if (char_row >= CHAR_ROWS) {
-        goto send_scanline; 
-    }
-
-    const uint row_in_char = real_y % bigfont.char_height;
-    const uint bytes_per_row = (bigfont.char_width + 7) / 8;
-    const uint bytes_per_char = bigfont.char_height * bytes_per_row;
-
-
-
-    // for (uint x = 0; x < FRAME_WIDTH; ++x) {
-    //     const uint pos = x / 8;
-    //     const uint bit = 7 - (x % 8);
-
-    //     if (x < SCREEN_MARGIN_X || x >= FRAME_WIDTH - SCREEN_MARGIN_X) {
-    //         bit_set(&scanbuf[pos], bit, 1);
-    //         continue;
-    //     }
-
-    //     //const uint real_x = x - SCREEN_MARGIN_X;
-    //     //const uint char_col = real_x / bigfont.char_width;
-    //     // if (char_col >= CHAR_COLS) {
-    //     //     bit_set(&scanbuf[pos], bit, 1); // Fill with black
-    //     //     continue;
-    //     // }
-
-    //     // char c = get_grid_char(chars, real_x / bigfont.char_width, char_row);
-    //     // if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?';
-
-    //     // const uint char_index = (c - bigfont.first_ascii);
-    //     // const uint char_x = real_x % bigfont.char_width;
-    //     // const uint font_offset = (char_index * bytes_per_char) + (row_in_char * bytes_per_row) + (char_x / 8);
-    //     // const uint8_t char_byte = bigfont.fontdata[font_offset];
-
-    //     // bit_set(&scanbuf[pos], bit, bit_get(char_byte, 7 - (char_x % 8)));
-    // }
-
-
-	// const uint char_row = y / bigfont.char_height;      // Vertical char row
-	// const uint row_in_char = y % bigfont.char_height;   // Row within a character
-	for (uint i = 0; i < CHAR_COLS; ++i) {  // One character per 24px block
-		if (y >= bigfont.char_height*CHAR_ROWS) {
-			scanbuf[i] = 0;
-			continue;
-		}
-
-		char c = chars[char_row * CHAR_COLS + i];
-		if (c < bigfont.first_ascii || c > bigfont.first_ascii + bigfont.n_chars) c = '?';
-
-		uint glyph_base = (c - bigfont.first_ascii) * bytes_per_char;
-		uint row_offset = row_in_char * bytes_per_row;
-
-		// Copy 3 bytes of this row from the font into scanline
-		for (int b = 0; b < bytes_per_row; ++b) {
-			scanbuf[(i * bytes_per_row) + b] = reverse_byte(bigfont.fontdata[glyph_base + row_offset + b]);
-		}
-	}
-
-    for (uint x = 0; x < FRAME_WIDTH; ++x) {
-        //sleep_us(1);
-    }
-
-send_scanline:
+    
     uint32_t *tmdsbuf;
     queue_remove_blocking(&dvi0.q_tmds_free, &tmdsbuf);
     tmds_encode_1bpp((const uint32_t*)scanbuf, tmdsbuf, FRAME_WIDTH);
@@ -271,7 +232,26 @@ send_scanline:
 
 void core1_scanline_callback() {
 	static uint y = 1;
-	prepare_scanline(grid_char, y); // charbuf is ascii char 0-9a-zA-Z
+    static uint copying = 0;
+
+    if (y == 0 && renderrequest != 0 && mutex_enter_timeout_us(&copying_sem, 1)) {
+        copying = 1; // We are copying the render buffer to the scanline buffer
+    }
+    if (copying) {
+        // Copy the render buffer to the scanline buffer
+        const uint16_t ypos = y * (FRAME_WIDTH / 8);
+        for (uint x = 0; x < (FRAME_WIDTH / 8); ++x) {
+            renderbuf[ypos + x] = framebuf[ypos + x];
+        }
+
+        if (y == FRAME_HEIGHT - 1) {
+            renderrequest = 0;
+            copying = 0;
+            mutex_exit(&copying_sem);
+        }
+    }
+
+	prepare_scanline(y);
 	y = (y + 1) % FRAME_HEIGHT;
 }
 
@@ -283,7 +263,7 @@ void __not_in_flash("main") core1_main() {
 	// The text display is completely IRQ driven (takes up around 30% of cycles @
 	// VGA). We could do something useful, or we could just take a nice nap
 	while (1) 
-		__wfi();
+		compute_render();
 	__builtin_unreachable();
 }
 
@@ -303,9 +283,14 @@ int __not_in_flash("main") main() {
 	dvi0.scanline_callback = core1_scanline_callback;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
+    mutex_init(&copying_sem);
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
 		grid_char[i] = (i % bigfont.n_chars)+bigfont.first_ascii;
-	prepare_scanline(grid_char, 0);
+    compute_render();
+    for (int i = 0; i < (FRAME_WIDTH / 8) * FRAME_HEIGHT; ++i) {
+        framebuf[i] = renderbuf[i];
+    }
+	prepare_scanline(0);
 
 	sem_init(&dvi_start_sem, 0, 1);
 	hw_set_bits(&bus_ctrl_hw->priority, BUSCTRL_BUS_PRIORITY_PROC1_BITS);
