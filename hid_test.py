@@ -16,7 +16,7 @@ if len(sys.argv) > 1:
         y = int(sys.argv[2])
     except ValueError:
         print("Invalid x value, using default 0")
-c = 'c'  # default character to send
+c = ''
 if len(sys.argv) > 3:
     c = sys.argv[3]
 
@@ -29,7 +29,11 @@ for vid in  USB_VID:
             print("Found device:", dict['product_string'], "at", dict['path'])
             print("Vendor ID:", hex(dict['vendor_id']), "Product ID:", hex(dict['product_id']))
 
-            command = bytes([1, x, y, ord(c), 0x00, 0x00])
+            command_list = [1, x, y, len(c)]
+            for char in c:
+                command_list.extend([ord(char), 0, 0])
+            command = bytes(command_list)
+            
             try:
                 dev.write(command)
                 print("Command sent:", command)
@@ -37,7 +41,10 @@ for vid in  USB_VID:
                 print("Error sending command:", e)
             try:
                 response = dev.read(64) 
-                print("Response received:", response)
+                if response[0] == 0x00:
+                    print("Success!")
+                else:
+                    print("Failure: n", response[1])
             except Exception as e:
                 print("Error reading response:", e)
             # Close the device

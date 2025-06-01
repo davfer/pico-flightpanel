@@ -50,7 +50,8 @@
         "sprite.h": "c",
         "font_24x32.h": "c",
         "random": "c",
-        "lock_core.h": "c"
+        "lock_core.h": "c",
+        "cstdint": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

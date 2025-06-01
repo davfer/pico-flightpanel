@@ -130,7 +130,10 @@ static inline void compute_render() {
         for (uint grid_x = 0; grid_x < CHAR_COLS; grid_x++) {
             uint16_t char_pos = grid_x + (grid_y * CHAR_COLS);
             char c = grid_char[char_pos];
-            if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?'; // Invalid character, use space
+            if (c == 0)
+                c = ' '; // Use space for empty characters
+            else if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) 
+                c = '?'; // Invalid character, use qustion mark
 
             uint16_t charpos_x = (grid_x * bigfont.char_width)+ (grid_x * CHAR_MARGIN_X) + SCREEN_MARGIN_X;
             uint16_t charpos_y = (grid_y * bigfont.char_height) + (grid_y * CHAR_MARGIN_Y) + SCREEN_MARGIN_Y;
@@ -215,7 +218,10 @@ int __not_in_flash("main") main() {
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
 		grid_char[i] = ' ';
     
-    memcpy(&grid_char[(6*24)+5], "Fluffy FMC 1.0", 14);
+    memcpy(&grid_char[(6*24)+5], "Fluffy FMC v1.0", 15);
+
+    // for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
+	// 	grid_char[i] = (i % 10) + '0'; // Fill with numbers for testing
 
     compute_render();
     for (int i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i) {
@@ -311,7 +317,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     uint8_t errNo = 0;
     switch (buffer[0]) {
         case 0x01:
-            if (bufsize < 6) {
+            if (bufsize < 4) {
                 errNo = 10;
                 break;
             }
@@ -319,35 +325,39 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
                 errNo = 11;
                 break;
             }
-            if (buffer[3] >= 0x80) {
-                errNo = 12;
-                break;
-            }
-            if (buffer[4] >= 10) {
-                errNo = 13;
-                break;
-            }
-            if (buffer[5] >= 2) {
-                errNo = 14;
+            if (buffer[3] > 20) {
+                errNo = 15;
                 break;
             }
 
-            uint8_t pos = buffer[1] + (buffer[2] * CHAR_COLS);
-            grid_char[pos] = buffer[3];
-            grid_color[pos] = buffer[4];
-            grid_type[pos] = buffer[5];
+            uint16_t pos = buffer[1] + (buffer[2] * CHAR_COLS);
+            if (pos >= CHAR_COLS * CHAR_ROWS || pos + buffer[3] > CHAR_COLS * CHAR_ROWS) {
+                errNo = 16;
+                break;
+            }
+            
+            for (uint8_t i = 0; i < buffer[3]; ++i) {
+                uint8_t offset = (i * 3) + 4; // Start at 4 to skip command and position bytes
+                if (buffer[offset+0] >= 0x80) {
+                    errNo = 12;
+                    break;
+                }
+                if (buffer[offset+1] >= 10) {
+                    errNo = 13;
+                    break;
+                }
+                if (buffer[offset+2] >= 2) {
+                    errNo = 14;
+                    break;
+                }
+                
+                grid_char[pos+i] = buffer[offset+0];
+                grid_color[pos+i] = buffer[offset+1];
+                grid_type[pos+i] = buffer[offset+2];
+            }
 
             back[0] = 0; // Success
             blink_interval_ms = BLINK_MOUNTED;
-
-            for (uint i = 0; i < 24; ++i) {
-                const uint framebuf_posx = i + 10;
-                const uint framebuf_pos = 0 + (framebuf_posx / 8); // x7 0 , x8 1
-                const uint framebuf_bit = 7 - (framebuf_posx % 8); // b0 , b7
-
-                back[2+(i*2)+0] = framebuf_pos; // Fill the back buffer with the frame buffer data
-                back[2+(i*2)+1] = framebuf_bit; // Fill the back buffer with the frame buffer data
-            }
 
             break;
         default:
