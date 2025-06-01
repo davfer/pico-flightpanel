@@ -19,6 +19,8 @@ if len(sys.argv) > 1:
 c = ''
 if len(sys.argv) > 3:
     c = sys.argv[3]
+if c.startswith('0x'):
+    c = bytes.fromhex(c[2:])
 
 
 for vid in  USB_VID:
@@ -31,7 +33,11 @@ for vid in  USB_VID:
 
             command_list = [1, x, y, len(c)]
             for char in c:
-                command_list.extend([ord(char), 0, 0])
+                if isinstance(char, int):
+                    v = char
+                else:
+                    v = ord(char)
+                command_list.extend([v, 0, 0])
             command = bytes(command_list)
             
             try:
