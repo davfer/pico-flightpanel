@@ -26,9 +26,9 @@
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
 #define SCREEN_MARGIN_X 8
-#define SCREEN_MARGIN_Y 0 // 4
+#define SCREEN_MARGIN_Y 4
 #define CHAR_MARGIN_X 2
-#define CHAR_MARGIN_Y 0 // 2
+#define CHAR_MARGIN_Y 2
 #define CHUNKS_PER_ROW (FRAME_WIDTH / 8)
 
 typedef struct {
@@ -213,7 +213,10 @@ int __not_in_flash("main") main() {
 
     mutex_init(&copying_sem);
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
-		grid_char[i] = (i % bigfont.n_chars)+bigfont.first_ascii;
+		grid_char[i] = ' ';
+    
+    memcpy(&grid_char[(6*24)+5], "Fluffy FMC 1.0", 14);
+
     compute_render();
     for (int i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i) {
         framebuf[i] = renderbuf[i];
