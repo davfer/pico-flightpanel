@@ -1,8 +1,11 @@
+// USB
+#include <stdio.h>
+#include "bsp/board.h"
+#include "tusb.h"
+#include "pico/stdlib.h"
 
 // DVI
-#include <stdio.h>
 #include <stdlib.h>
-#include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
@@ -23,9 +26,10 @@
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
 #define SCREEN_MARGIN_X 8
-#define SCREEN_MARGIN_Y 8
+#define SCREEN_MARGIN_Y 0 // 4
 #define CHAR_MARGIN_X 2
-#define CHAR_MARGIN_Y 2
+#define CHAR_MARGIN_Y 0 // 2
+#define CHUNKS_PER_ROW (FRAME_WIDTH / 8)
 
 typedef struct {
     unsigned char char_width; // 24
@@ -33,6 +37,8 @@ typedef struct {
     unsigned char first_ascii; // 32
     unsigned char n_chars; // 95
     const unsigned char *fontdata;
+    const unsigned char bytes_per_row; // 3
+    const unsigned char bytes_per_char; // 96
 } font_t;
 
 const font_t bigfont = {
@@ -41,6 +47,8 @@ const font_t bigfont = {
     .first_ascii = Inconsola[2],
     .n_chars = Inconsola[3],
     .fontdata = &Inconsola[4],
+    .bytes_per_row = (Inconsola[0] + 7) / 8,
+    .bytes_per_char = ((Inconsola[0] + 7) / 8) * Inconsola[1],
 };
 
 // Pick one:
@@ -59,16 +67,9 @@ struct mutex copying_sem;
 char grid_char[CHAR_COLS * CHAR_ROWS];
 char grid_color[CHAR_COLS * CHAR_ROWS];
 char grid_type[CHAR_COLS * CHAR_ROWS];
-uint8_t framebuf[(FRAME_WIDTH / 8) * FRAME_HEIGHT]; // 1bpp framebuffer for the DVI output
-uint8_t renderbuf[(FRAME_WIDTH / 8) * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
+uint8_t framebuf[CHUNKS_PER_ROW * FRAME_HEIGHT]; // 1bpp framebuffer for the DVI output
+uint8_t renderbuf[CHUNKS_PER_ROW * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
 uint8_t renderrequest = 0; // Flag to indicate a render request
-
-
-// USB
-#include <stdio.h>
-#include "bsp/board.h"
-#include "tusb.h"
-#include "pico/stdlib.h"
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -92,92 +93,21 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
-// Returns an array of 16bit bpp values representing a char [0-CHAR_WIDTH]
-// Pre: c is a valid ASCII character and y < CHAR_HEIGHT
-// uint16_t* compute_char_scanline(uint y, char c, uint16_t fg, char type) {
-//     const uint8_t char_width = bigfont.char_width;
-//     const uint8_t char_height = bigfont.char_height;
-//     const uint8_t first_ascii = bigfont.first_ascii;
-//     const uint8_t n_chars = bigfont.n_chars;
-//     const uint8_t bytes_per_row = (char_width + 7) / 8;
-
-//     if (c < first_ascii || c >= first_ascii + n_chars || y >= char_height) {
-//         return NULL; // invalid character or row
-//     }
-
-//     uint16_t* char_buffer = malloc(char_width * sizeof(uint16_t));
-//     if (!char_buffer) return NULL;
-
-//     uint char_index = c - first_ascii;
-//     uint char_offset = (char_index * char_height * bytes_per_row) + (y * bytes_per_row);
-
-//     for (uint x = 0; x < char_width; x++) {
-//         uint8_t byte = bigfont.fontdata[char_offset + (x / 8)];
-//         uint8_t bit = 7 - (x % 8); // MSB first
-//         uint8_t val = (byte >> bit) & 1;
-
-//         char_buffer[x] = val ? fg : 0x0000;
-//     }
-
-//     return char_buffer;
-// }
-
-// // Returns an array of 16bit bpp values representing a scanline SCREEN_WIDTH for the DVI output.
-// // Pre: y < SCREEN_HEIGHT
-// void compute_scanline(uint y) {
-//     uint16_t* buffer;
-//     for (uint x = 0; x < SCREEN_WIDTH; x++) {
-//         if (x > 300) {
-//             // Fill first 10 pixels with white
-//             framebuf[x] = 0xFFFF; // White
-//             continue;
-//         }
-//         if (y > 240) {
-//             // Fill first 10 pixels with white
-//             framebuf[x] = 0xFF00; // White
-//             continue;
-//         }
-
-
-//         framebuf[x] = 0x0000; 
-
-//         // compute row/col of the char grid based on x and y if not out of grid
-//         // if (x >= CHAR_COLS * CHAR_WIDTH || y >= CHAR_ROWS * CHAR_HEIGHT) {
-//         //     framebuf[x] = 0xF000;
-//         //     continue;
-//         // }
-//         uint16_t char_pos = (x / CHAR_WIDTH) + ((y / CHAR_HEIGHT) * CHAR_COLS);
-
-//         // buffer = compute_char_scanline(y % CHAR_HEIGHT, grid_char[char_pos], grid_color[char_pos], grid_type[char_pos]);
-//         // for (uint i = 0; i < CHAR_WIDTH; i++) {
-//         //     if (x >= SCREEN_WIDTH) {
-//         //         continue;
-//         //     }
-//         //     framebuf[x] = buffer[i];
-//         //     x++;
-//         // }
-//     }
-// }
-
-
-//--------------------------------------------------------------------+
-
 static inline void compute_char(uint dest_x, uint dest_y, char c) {
     uint char_index = c - bigfont.first_ascii;
-    uint bytes_per_row = (bigfont.char_width + 7) / 8;
     for (uint y = 0; y < bigfont.char_height; ++y) {
-        const uint framebuf_posy = (dest_y + y) * (FRAME_WIDTH / 8);
+        const uint framebuf_posy = (dest_y + y) * CHUNKS_PER_ROW;
 
         for (uint x = 0; x < bigfont.char_width; ++x) {
-            const uint framebuf_posx = dest_x + x;
-            const uint framebuf_pos = framebuf_posy + (framebuf_posx / 8);
-            const uint framebuf_bit = 7 - (framebuf_posx % 8);
-                        
-            uint char_offset = (char_index * bigfont.char_height * bytes_per_row) + (y * bytes_per_row);
+            uint char_offset = (y * bigfont.bytes_per_row) + (char_index * bigfont.bytes_per_char);
             uint8_t font_byte = bigfont.fontdata[char_offset + (x / 8)];
-            uint8_t bit = x % 8;
+            uint8_t bit = 7 - (x % 8);
             uint8_t pix = (font_byte >> bit) & 1;
 
+            const uint framebuf_posx = dest_x + x;
+            const uint framebuf_pos = framebuf_posy + (framebuf_posx / 8); // x7 0 , x8 1
+            const uint framebuf_bit = framebuf_posx % 8; // b0 , b7
+                        
             if (pix == 0) {
                 framebuf[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
             } else {
@@ -192,19 +122,18 @@ static inline void compute_render() {
     mutex_enter_blocking(&copying_sem);
 
     // clear the frame buffer
-    for (uint i = 0; i < (FRAME_WIDTH / 8) * FRAME_HEIGHT; ++i) {
+    for (uint i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i) {
         framebuf[i] = 0; // Clear the frame buffer
     }
 
-    // Fill the frame buffer with characters from the grid
     for (uint grid_y = 0; grid_y < CHAR_ROWS; grid_y++) {
         for (uint grid_x = 0; grid_x < CHAR_COLS; grid_x++) {
             uint16_t char_pos = grid_x + (grid_y * CHAR_COLS);
             char c = grid_char[char_pos];
             if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars) c = '?'; // Invalid character, use space
 
-            uint16_t charpos_x = (grid_x * bigfont.char_width) + (grid_x * CHAR_MARGIN_X) + SCREEN_MARGIN_X; //  
-            uint16_t charpos_y = (grid_y * bigfont.char_height);
+            uint16_t charpos_x = (grid_x * bigfont.char_width)+ (grid_x * CHAR_MARGIN_X) + SCREEN_MARGIN_X;
+            uint16_t charpos_y = (grid_y * bigfont.char_height) + (grid_y * CHAR_MARGIN_Y) + SCREEN_MARGIN_Y;
 
             compute_char(charpos_x, charpos_y, c);
         }
@@ -216,11 +145,10 @@ static inline void compute_render() {
 }
 
 static inline void prepare_scanline(uint y) {
-    #define CHUNKS_PER_SCANLINE (FRAME_WIDTH / 8)
-    static uint8_t scanbuf[CHUNKS_PER_SCANLINE];
-    const uint16_t ypos = y * CHUNKS_PER_SCANLINE;
+    static uint8_t scanbuf[CHUNKS_PER_ROW];
+    const uint16_t ypos = y * CHUNKS_PER_ROW;
 
-    for (uint x = 0; x < CHUNKS_PER_SCANLINE; ++x) {
+    for (uint x = 0; x < CHUNKS_PER_ROW; ++x) {
         scanbuf[x] = renderbuf[ypos + x]; // Clear the scanline buffer
     }
     
@@ -239,8 +167,8 @@ void core1_scanline_callback() {
     }
     if (copying) {
         // Copy the render buffer to the scanline buffer
-        const uint16_t ypos = y * (FRAME_WIDTH / 8);
-        for (uint x = 0; x < (FRAME_WIDTH / 8); ++x) {
+        const uint16_t ypos = y * CHUNKS_PER_ROW;
+        for (uint x = 0; x < CHUNKS_PER_ROW; ++x) {
             renderbuf[ypos + x] = framebuf[ypos + x];
         }
 
@@ -287,7 +215,7 @@ int __not_in_flash("main") main() {
 	for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
 		grid_char[i] = (i % bigfont.n_chars)+bigfont.first_ascii;
     compute_render();
-    for (int i = 0; i < (FRAME_WIDTH / 8) * FRAME_HEIGHT; ++i) {
+    for (int i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i) {
         framebuf[i] = renderbuf[i];
     }
 	prepare_scanline(0);
@@ -408,6 +336,16 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 
             back[0] = 0; // Success
             blink_interval_ms = BLINK_MOUNTED;
+
+            for (uint i = 0; i < 24; ++i) {
+                const uint framebuf_posx = i + 10;
+                const uint framebuf_pos = 0 + (framebuf_posx / 8); // x7 0 , x8 1
+                const uint framebuf_bit = 7 - (framebuf_posx % 8); // b0 , b7
+
+                back[2+(i*2)+0] = framebuf_pos; // Fill the back buffer with the frame buffer data
+                back[2+(i*2)+1] = framebuf_bit; // Fill the back buffer with the frame buffer data
+            }
+
             break;
         default:
             errNo = 1; // Unknown command
