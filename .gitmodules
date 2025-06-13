@@ -1,0 +1,9 @@
+[submodule "modules/pico-mcp23017"]
+	path = modules/pico-mcp23017
+	url = https://github.com/adamboardman/pico-mcp23017.git
+[submodule "modules/pico-interfaces"]
+	path = modules/pico-interfaces
+	url = https://github.com/adamboardman/pico-interfaces.git
+[submodule "modules/PicoDVI"]
+	path = modules/PicoDVI
+	url = https://github.com/Wren6991/PicoDVI.git

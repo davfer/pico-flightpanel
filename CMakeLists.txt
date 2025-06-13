@@ -36,7 +36,7 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(pico-flightpanel2 
-    pico-flightpanel2.c 
+    pico-flightpanel2.c
     usb_descriptors.c)
 
 pico_set_program_name(pico-flightpanel2 "pico-flightpanel2")
@@ -62,7 +62,7 @@ target_link_libraries(pico-flightpanel2
 target_include_directories(pico-flightpanel2 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
-add_subdirectory(libdvi)
+add_subdirectory(modules/PicoDVI/software/libdvi)
 
 set(DVI_DEFAULT_SERIAL_CONFIG "pico_sock_cfg" CACHE STRING
 	"Select a default pin configuration from common_dvi_pin_configs.h")

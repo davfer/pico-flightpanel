@@ -4,6 +4,11 @@
 #include "tusb.h"
 #include "pico/stdlib.h"
 
+// STUFF
+#include "hardware/pwm.h"
+#include "hardware/i2c.h"
+#include "mcp23017.h"
+
 // DVI
 #include <stdlib.h>
 #include "pico/multicore.h"
@@ -22,6 +27,15 @@
 #include "tmds_encode.h"
 
 #include "inconsola.c"
+
+#define PWM_PIN 2
+#define PWM_FREQ 1000
+
+#define MCP23017_I2C_ADDR 0x20 // I2C address for MCP23017
+#define MCP23017_NUM 1 // Number of MCP23017 devices
+#define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
+#define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
+#define MCP23017_POLLING_TIME 100 // GPIO pin for I2C SCL
 
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
@@ -71,6 +85,140 @@ char grid_type[CHAR_COLS * CHAR_ROWS];
 uint8_t framebuf[CHUNKS_PER_ROW * FRAME_HEIGHT];  // 1bpp framebuffer for the DVI output
 uint8_t renderbuf[CHUNKS_PER_ROW * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
 uint8_t renderrequest = 0;                        // Flag to indicate a render request
+
+uint16_t mcp23017_gpio[MCP23017_NUM]; // MCP23017 GPIO states
+uint16_t mcp23017_gpio_dir[MCP23017_NUM] ; // MCP23017 GPIO direction states
+
+const uint16_t mcp23017_gpio_default_dir[MCP23017_NUM] = {
+    0xFFFF, // 0x20: IN1 {CLR, V, /, W, DEL...}
+};
+
+//--------------------------------------------------------------------+
+// I2C MCP23017
+//--------------------------------------------------------------------+
+
+int mcp23017_write_register(uint8_t address, uint8_t reg, uint8_t value) {
+	uint8_t command[] = { reg, value };
+	int result = i2c_write_blocking(i2c0, address, command, 2, false);
+	if (result == PICO_ERROR_GENERIC) {
+		return result;
+	}
+	return PICO_ERROR_NONE;
+}
+
+uint16_t mcp23017_read_register(uint8_t address, uint8_t reg) {
+	uint8_t buffer = 0;
+	int result;
+	result = i2c_write_blocking(i2c0, address,  &reg, 1, true);
+	if (result == PICO_ERROR_GENERIC) {
+		return result;
+	}
+
+	result = i2c_read_blocking(i2c0, address, &buffer, 1, false);
+	if (result == PICO_ERROR_GENERIC)
+		return result;
+
+	return buffer;
+}
+
+int mcp23017_write_dual_registers(uint8_t address, uint8_t reg, int value) {
+	uint8_t command[] = {
+			reg,
+			value & 0xff,
+			(value>>8) & 0xff
+	};
+	int result = i2c_write_blocking(i2c0, address, command, 3, false);
+	if (result == PICO_ERROR_GENERIC) {
+		return result;
+	}
+	return PICO_ERROR_NONE;
+}
+
+uint16_t mcp23017_read_dual_registers(uint8_t address, uint8_t reg) {
+	uint8_t buffer[2] = {0, 0};
+	int result;
+	result = i2c_write_blocking(i2c0, address,  &reg, 1, true);
+	if (result == PICO_ERROR_GENERIC) {
+		return result;
+	}
+
+	result = i2c_read_blocking(i2c0, address, buffer, 2, false);
+	if (result == PICO_ERROR_GENERIC)
+		return result;
+
+	return (buffer[1]<<8) + buffer[0];
+}
+
+int mcp23017_set_io_direction(uint8_t address, int direction) {
+	return mcp23017_write_dual_registers(address, MCP23017_IODIRA, direction); 
+}
+
+int mcp23017_set_pullup(uint8_t address, int direction) {
+	return mcp23017_write_dual_registers(address, MCP23017_GPPUA, direction);
+}
+
+int mcp23017_set_pol(uint8_t address, int direction) {
+	return mcp23017_write_dual_registers(address, MCP23017_IPOLA, direction);
+}
+
+
+void mcp23017_init(void)
+{
+    i2c_init(i2c0, 100 * 1000); // Initialize I2C at 100kHz
+    gpio_set_function(MCP23017_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(MCP23017_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(MCP23017_I2C_SDA_PIN);
+    gpio_pull_up(MCP23017_I2C_SCL_PIN);
+
+    // Initialize MCP23017 devices
+    for (uint8_t i = 0; i < MCP23017_NUM; i++)
+    {
+        uint8_t addr = MCP23017_I2C_ADDR + i;
+        mcp23017_set_io_direction(addr, mcp23017_gpio_default_dir[i]);
+        mcp23017_set_pullup(addr, mcp23017_gpio_default_dir[i]);
+        mcp23017_set_pol(addr, 0xFFFF);
+        mcp23017_gpio_dir[i] = mcp23017_gpio_default_dir[i];
+    }
+}
+
+//--------------------------------------------------------------------+
+// POLLING
+//--------------------------------------------------------------------+
+
+void gpio_polling_task(void)
+{
+    static uint32_t poll_ms = 0;
+    if (board_millis() - poll_ms < MCP23017_POLLING_TIME)
+        return; // not enough time
+    poll_ms += MCP23017_POLLING_TIME;
+
+    static uint8_t mcp23017_selected = 0;
+
+    for (uint8_t i = 0; i < MCP23017_NUM; i++)
+    {
+        uint8_t addr = MCP23017_I2C_ADDR + i;
+        mcp23017_gpio[mcp23017_selected * 16] = mcp23017_read_dual_registers(addr, MCP23017_GPIOA);
+    }
+
+    mcp23017_selected = (mcp23017_selected + 1) % MCP23017_NUM; // Cycle through MCP23017 devices
+
+    // Update the grid_char array based on the MCP23017 GPIO states
+    const char x = 4;
+    const char y = 10;
+
+    uint16_t gpio_value = mcp23017_gpio[0];
+    for (uint16_t i = 0; i < 16; i++)
+    {
+        if (gpio_value & (1 << (i % 16)))
+        {
+            grid_char[(y * 24) + x + i] = '1'; // Example character for pressed button
+        }
+        else
+        {
+            grid_char[(y * 24) + x + i] = '0'; // Example character for unpressed button
+        }
+    }
+}
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -240,9 +388,11 @@ void __not_in_flash("main") core1_main()
 
     // The text display is completely IRQ driven (takes up around 30% of cycles @
     // VGA). We could do something useful, or we could just take a nice nap
-    while (1)
+    while (1) {
         compute_render();
-
+        // tus_task(); // tinyusb device task
+    }
+        
     __builtin_unreachable();
 }
 
@@ -287,6 +437,16 @@ int __not_in_flash("main") main()
     // USB
     board_init();
 
+    // PWM
+    gpio_set_function(0, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PWM_PIN);
+    pwm_set_wrap(slice_num, PWM_FREQ - 1); 
+    pwm_set_gpio_level(PWM_PIN, PWM_FREQ / 2);
+    pwm_set_enabled(slice_num, true);
+
+    // I2C
+    mcp23017_init();
+
     // init device stack on configured roothub port
     tusb_rhport_init_t dev_init = {
         .role = TUSB_ROLE_DEVICE,
@@ -302,7 +462,7 @@ int __not_in_flash("main") main()
     {
         tud_task(); // tinyusb device task
         led_blinking_task();
-
+        gpio_polling_task(); // Poll MCP23017 GPIOs
     }
 }
 
@@ -338,6 +498,86 @@ void tud_resume_cb(void)
 }
 
 //--------------------------------------------------------------------+
+// COMMANDS
+//--------------------------------------------------------------------+
+uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
+    if (bufsize < 3)
+        return 10;
+    if (buffer[0] >= CHAR_COLS || buffer[1] >= CHAR_ROWS)
+        return 11;
+    if (buffer[2] > 20)
+        return 15;
+    
+
+    uint16_t pos = buffer[0] + (buffer[1] * CHAR_COLS);
+    if (pos >= CHAR_COLS * CHAR_ROWS || pos + buffer[2] > CHAR_COLS * CHAR_ROWS)
+        return 16;
+
+    for (uint8_t i = 0; i < buffer[2]; ++i)
+    {
+        uint8_t offset = (i * 3) + 3; // Start at 3 to skip position bytes
+        if (buffer[offset + 0] >= 0x80)
+            return 12; // Invalid character
+        if (buffer[offset + 1] >= 10)
+            return 13; // Invalid color
+        if (buffer[offset + 2] >= 2)
+            return 14; // Invalid type
+
+        grid_char[pos + i] = buffer[offset + 0];
+        grid_color[pos + i] = buffer[offset + 1];
+        grid_type[pos + i] = buffer[offset + 2];
+    }
+
+    return 0;
+}
+uint set_pwm(uint8_t const *buffer, uint16_t bufsize) {
+    if (bufsize < 1)
+        return 10;
+
+    // Set the PWM duty cycle based on the first byte of the buffer
+    uint8_t duty_cycle = buffer[0];
+    if (duty_cycle > 100)
+        duty_cycle = 100; // Clamp to 100%
+
+    uint slice_num = pwm_gpio_to_slice_num(PWM_PIN);
+    pwm_set_gpio_level(PWM_PIN, (PWM_FREQ * duty_cycle) / 100);
+
+    return 0; // Success
+}
+uint set_mcp_pins(uint8_t const *buffer, uint16_t bufsize) {
+    if (bufsize < 2)
+        return 10; // Not enough data
+
+    // bufsize[0] contains the number of pins given
+    // bufsize[1] contains the pin number [0, 79]
+
+
+    
+}
+uint get_mcp_pins(uint8_t const *buffer, uint16_t bufsize, uint8_t *back) {
+    if (bufsize < 1)
+        return 10; // Not enough data
+
+    // buffer[0] contains the pin number to read
+
+    #define MCP23017_NUM_PINS MCP23017_NUM*16 // 5 MCP23017 devices, 16 pins each
+    if (buffer[0] >= MCP23017_NUM_PINS)
+        return 11; // Invalid pin number
+
+    back[0] = MCP23017_NUM_PINS - buffer[0]; // Return the number of pins to read (max 60)
+    if (back[0] > 60)
+        back[0] = 60;
+
+    for (uint8_t i = 0; i < back[0]; ++i)
+    {
+        uint8_t pin = buffer[0] + i;
+        back[i + 1] = mcp23017_gpio[pin];
+    }
+
+    return 0; // Success
+}
+
+//--------------------------------------------------------------------+
 // USB HID
 //--------------------------------------------------------------------+
 
@@ -369,56 +609,16 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     switch (buffer[0])
     {
     case 0x01:
-        if (bufsize < 4)
-        {
-            errNo = 10;
-            break;
-        }
-        if (buffer[1] >= CHAR_COLS || buffer[2] >= CHAR_ROWS)
-        {
-            errNo = 11;
-            break;
-        }
-        if (buffer[3] > 20)
-        {
-            errNo = 15;
-            break;
-        }
-
-        uint16_t pos = buffer[1] + (buffer[2] * CHAR_COLS);
-        if (pos >= CHAR_COLS * CHAR_ROWS || pos + buffer[3] > CHAR_COLS * CHAR_ROWS)
-        {
-            errNo = 16;
-            break;
-        }
-
-        for (uint8_t i = 0; i < buffer[3]; ++i)
-        {
-            uint8_t offset = (i * 3) + 4; // Start at 4 to skip command and position bytes
-            if (buffer[offset + 0] >= 0x80)
-            {
-                errNo = 12;
-                break;
-            }
-            if (buffer[offset + 1] >= 10)
-            {
-                errNo = 13;
-                break;
-            }
-            if (buffer[offset + 2] >= 2)
-            {
-                errNo = 14;
-                break;
-            }
-
-            grid_char[pos + i] = buffer[offset + 0];
-            grid_color[pos + i] = buffer[offset + 1];
-            grid_type[pos + i] = buffer[offset + 2];
-        }
-
-        back[0] = 0; // Success
-        blink_interval_ms = BLINK_MOUNTED;
-
+        errNo = set_pixels(buffer + 1, bufsize - 1);
+        break;
+    case 0x02:
+        errNo = set_pwm(buffer + 1, bufsize - 1);
+        break;
+    case 0x03:
+        errNo = set_mcp_pins(buffer + 1, bufsize - 1);
+        break;
+    case 0x04:
+        errNo = get_mcp_pins(buffer + 1, bufsize - 1, back + 1);
         break;
     default:
         errNo = 1; // Unknown command
@@ -430,6 +630,9 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         blink_interval_ms = BLINK_FAIL;
         back[0] = 255;   // Error
         back[1] = errNo; // Error Number
+    } else {
+        blink_interval_ms = BLINK_MOUNTED; // Reset blink interval on success
+        back[0] = 0; // Success
     }
 
     while (!tud_hid_ready())

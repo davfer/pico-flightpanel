@@ -51,7 +51,9 @@
         "font_24x32.h": "c",
         "random": "c",
         "lock_core.h": "c",
-        "cstdint": "c"
+        "cstdint": "c",
+        "mcp23017.h": "c",
+        "i2c.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
