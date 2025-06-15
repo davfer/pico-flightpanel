@@ -35,7 +35,7 @@
 #define MCP23017_NUM 1 // Number of MCP23017 devices
 #define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
 #define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
-#define MCP23017_POLLING_TIME 100 // GPIO pin for I2C SCL
+#define MCP23017_POLLING_TIME 20 // GPIO pin for I2C SCL
 
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
@@ -544,7 +544,7 @@ uint set_pwm(uint8_t const *buffer, uint16_t bufsize) {
 
     return 0; // Success
 }
-uint set_mcp_pins(uint8_t const *buffer, uint16_t bufsize) {
+uint set_mcp_pin(uint8_t const *buffer, uint16_t bufsize) {
     if (bufsize < 2)
         return 10; // Not enough data
 
@@ -555,25 +555,30 @@ uint set_mcp_pins(uint8_t const *buffer, uint16_t bufsize) {
     
 }
 uint get_mcp_pins(uint8_t const *buffer, uint16_t bufsize, uint8_t *back) {
-    if (bufsize < 1)
-        return 10; // Not enough data
+    // if (bufsize < 1)
+    //     return 10; // Not enough data
 
     // buffer[0] contains the pin number to read
 
-    #define MCP23017_NUM_PINS MCP23017_NUM*16 // 5 MCP23017 devices, 16 pins each
-    if (buffer[0] >= MCP23017_NUM_PINS)
-        return 11; // Invalid pin number
+    // #define MCP23017_NUM_PINS MCP23017_NUM*16 // 5 MCP23017 devices, 16 pins each
+    // if (buffer[0] >= MCP23017_NUM_PINS)
+    //     return 11; // Invalid pin number
 
-    back[0] = MCP23017_NUM_PINS - buffer[0]; // Return the number of pins to read (max 60)
-    if (back[0] > 60)
-        back[0] = 60;
+    // back[0] = MCP23017_NUM_PINS - buffer[0]; // Return the number of pins to read (max 60)
+    // if (back[0] > 60)
+    //     back[0] = 60;
 
-    for (uint8_t i = 0; i < back[0]; ++i)
+    // for (uint8_t i = 0; i < back[0]; ++i)
+    // {
+    //     uint8_t pin = buffer[0] + i;
+    //     back[i + 1] = mcp23017_gpio[pin];
+    // }
+
+    for (uint8_t i = 0; i < MCP23017_NUM; ++i)
     {
-        uint8_t pin = buffer[0] + i;
-        back[i + 1] = mcp23017_gpio[pin];
+        back[i * 2 + 0] = (mcp23017_gpio[i] >> 8) & 0xFF; // High byte
+        back[i * 2 + 1] = mcp23017_gpio[i] & 0xFF; // Low byte
     }
-
     return 0; // Success
 }
 
@@ -615,7 +620,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         errNo = set_pwm(buffer + 1, bufsize - 1);
         break;
     case 0x03:
-        errNo = set_mcp_pins(buffer + 1, bufsize - 1);
+        errNo = set_mcp_pin(buffer + 1, bufsize - 1);
         break;
     case 0x04:
         errNo = get_mcp_pins(buffer + 1, bufsize - 1, back + 1);
