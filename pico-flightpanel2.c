@@ -7,7 +7,16 @@
 // STUFF
 #include "hardware/pwm.h"
 #include "hardware/i2c.h"
+
+// MCP23017
+#define MCP23017_I2C_ADDR 0x20 // I2C address for MCP23017
+#define MCP23017_NUM 0 // Number of MCP23017 devices
+#define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
+#define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
+#define MCP23017_POLLING_TIME 20 // GPIO pin for I2C SCL
+#if MCP23017_NUM > 0
 #include "mcp23017.h"
+#endif
 
 // DVI
 #include <stdlib.h>
@@ -30,12 +39,6 @@
 
 #define PWM_PIN 2
 #define PWM_FREQ 1000
-
-#define MCP23017_I2C_ADDR 0x20 // I2C address for MCP23017
-#define MCP23017_NUM 1 // Number of MCP23017 devices
-#define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
-#define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
-#define MCP23017_POLLING_TIME 20 // GPIO pin for I2C SCL
 
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
@@ -86,16 +89,34 @@ uint8_t framebuf[CHUNKS_PER_ROW * FRAME_HEIGHT];  // 1bpp framebuffer for the DV
 uint8_t renderbuf[CHUNKS_PER_ROW * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
 uint8_t renderrequest = 0;                        // Flag to indicate a render request
 
-uint16_t mcp23017_gpio[MCP23017_NUM]; // MCP23017 GPIO states
-uint16_t mcp23017_gpio_dir[MCP23017_NUM] ; // MCP23017 GPIO direction states
 
-const uint16_t mcp23017_gpio_default_dir[MCP23017_NUM] = {
-    0xFFFF, // 0x20: IN1 {CLR, V, /, W, DEL...}
-};
-
+#if MCP23017_NUM > 0
 //--------------------------------------------------------------------+
 // I2C MCP23017
 //--------------------------------------------------------------------+
+
+uint16_t mcp23017_gpio[MCP23017_NUM]; // MCP23017 GPIO states
+uint16_t mcp23017_gpio_masked[MCP23017_NUM]; // MCP23017 GPIO states
+uint16_t mcp23017_gpio_dir[MCP23017_NUM] ; // MCP23017 GPIO direction states
+uint8_t mcp23017_status[MCP23017_NUM]; // MCP23017 status
+
+const uint16_t mcp23017_gpio_default_dir[MCP23017_NUM] = {
+    0xFFFF, // 0x20: IN1 {CLR, V, /, W, DEL, ...}
+    0xFFFF, // 0x21: IN2 {G, K, E, ...}
+    // 0xF0F0, // 0x22: OUT {EXEC, FAIL, ...}
+    0b1110000011110000, // 0x22: OUT {EXEC, FAIL, ...}
+    0xFFFF, // 0x23: IN3 {0, ., 4, ...}
+    0xFFFF, // 0x24: IN3 {+/-, CLB, F, ...}
+};
+
+const uint8_t mcp23017_address[MCP23017_NUM] = {
+    MCP23017_I2C_ADDR, // 0x20
+    MCP23017_I2C_ADDR + 1, // 0x21
+    MCP23017_I2C_ADDR + 2, // 0x22
+    MCP23017_I2C_ADDR + 3, // 0x23
+    MCP23017_I2C_ADDR + 4, // 0x24
+};
+
 
 int mcp23017_write_register(uint8_t address, uint8_t reg, uint8_t value) {
 	uint8_t command[] = { reg, value };
@@ -134,17 +155,20 @@ int mcp23017_write_dual_registers(uint8_t address, uint8_t reg, int value) {
 	return PICO_ERROR_NONE;
 }
 
-uint16_t mcp23017_read_dual_registers(uint8_t address, uint8_t reg) {
+uint16_t mcp23017_read_dual_registers(uint8_t address, uint8_t reg, uint8_t *err) {
 	uint8_t buffer[2] = {0, 0};
 	int result;
 	result = i2c_write_blocking(i2c0, address,  &reg, 1, true);
 	if (result == PICO_ERROR_GENERIC) {
-		return result;
+		*err = 2;
+		return 0;
 	}
 
 	result = i2c_read_blocking(i2c0, address, buffer, 2, false);
-	if (result == PICO_ERROR_GENERIC)
-		return result;
+	if (result == PICO_ERROR_GENERIC) {
+		*err = 3;
+		return 0;
+	}
 
 	return (buffer[1]<<8) + buffer[0];
 }
@@ -161,7 +185,6 @@ int mcp23017_set_pol(uint8_t address, int direction) {
 	return mcp23017_write_dual_registers(address, MCP23017_IPOLA, direction);
 }
 
-
 void mcp23017_init(void)
 {
     i2c_init(i2c0, 100 * 1000); // Initialize I2C at 100kHz
@@ -173,19 +196,28 @@ void mcp23017_init(void)
     // Initialize MCP23017 devices
     for (uint8_t i = 0; i < MCP23017_NUM; i++)
     {
-        uint8_t addr = MCP23017_I2C_ADDR + i;
-        mcp23017_set_io_direction(addr, mcp23017_gpio_default_dir[i]);
-        mcp23017_set_pullup(addr, mcp23017_gpio_default_dir[i]);
-        mcp23017_set_pol(addr, 0xFFFF);
+        uint8_t addr = mcp23017_address[i];
+        int res = mcp23017_set_io_direction(addr, mcp23017_gpio_default_dir[i]);
+        if (res != PICO_ERROR_NONE) {
+            mcp23017_status[i] = 4;
+            continue; // Error setting direction
+        }
+        res = mcp23017_set_pullup(addr, mcp23017_gpio_default_dir[i]);
+        if (res != PICO_ERROR_NONE) {
+            mcp23017_status[i] = 5;
+            continue; // Error setting pullup
+        }
+        res = mcp23017_set_pol(addr, 0xFFFF);
+        if (res != PICO_ERROR_NONE) {
+            mcp23017_status[i] = 6;
+            continue; // Error setting polarity
+        }
         mcp23017_gpio_dir[i] = mcp23017_gpio_default_dir[i];
+        mcp23017_status[i] = 1; // Device initialized successfully
     }
 }
 
-//--------------------------------------------------------------------+
-// POLLING
-//--------------------------------------------------------------------+
-
-void gpio_polling_task(void)
+void mcp23017_polling_task(void)
 {
     static uint32_t poll_ms = 0;
     if (board_millis() - poll_ms < MCP23017_POLLING_TIME)
@@ -194,30 +226,68 @@ void gpio_polling_task(void)
 
     static uint8_t mcp23017_selected = 0;
 
-    for (uint8_t i = 0; i < MCP23017_NUM; i++)
-    {
-        uint8_t addr = MCP23017_I2C_ADDR + i;
-        mcp23017_gpio[mcp23017_selected * 16] = mcp23017_read_dual_registers(addr, MCP23017_GPIOA);
-    }
+    uint8_t addr = mcp23017_address[mcp23017_selected];
+    mcp23017_gpio[mcp23017_selected] = mcp23017_read_dual_registers(addr, MCP23017_GPIOA, &mcp23017_status[mcp23017_selected]);
+    mcp23017_gpio_masked[mcp23017_selected] |= mcp23017_gpio[mcp23017_selected];
 
     mcp23017_selected = (mcp23017_selected + 1) % MCP23017_NUM; // Cycle through MCP23017 devices
 
-    // Update the grid_char array based on the MCP23017 GPIO states
-    const char x = 4;
-    const char y = 10;
+    // TEST CODE Update the grid_char array based on the MCP23017 GPIO states
+    // const char x = 4;
+    // const char y = 8;
 
-    uint16_t gpio_value = mcp23017_gpio[0];
-    for (uint16_t i = 0; i < 16; i++)
-    {
-        if (gpio_value & (1 << (i % 16)))
-        {
-            grid_char[(y * 24) + x + i] = '1'; // Example character for pressed button
-        }
-        else
-        {
-            grid_char[(y * 24) + x + i] = '0'; // Example character for unpressed button
-        }
-    }
+    // for (uint8_t i = 0; i < MCP23017_NUM; i++)
+    // {
+    //     uint16_t gpio_value = mcp23017_gpio[i];
+    //     for (uint16_t j = 0; j < 16; j++)
+    //     {
+    //         if (gpio_value & (1 << (j % 16)))
+    //         {
+    //             grid_char[((y + i) * CHAR_COLS) + x + j] = '1'; // Example character for pressed button
+    //         }
+    //         else
+    //         {
+    //             grid_char[((y + i) * CHAR_COLS) + x + j] = '0'; // Example character for unpressed button
+    //         }
+    //     }
+
+    //     switch (mcp23017_status[i]) 
+    //     {
+    //     case 0:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = '-';
+    //         break;
+    //     case 1:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = 'S';
+    //         break;
+    //     case 2:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = 'F';
+    //         break;
+    //     case 3:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = 'G';
+    //         break;
+    //     case 4:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = 'H';
+    //         break;
+    //     case 5:
+    //         grid_char[((y + i) * CHAR_COLS) + x - 2] = 'P';
+    //         break;
+    //     default:
+    //         break;
+    //     }
+    // }
+}
+
+#endif
+
+//--------------------------------------------------------------------+
+// POLLING
+//--------------------------------------------------------------------+
+
+void poll_task(void)
+{
+    #if MCP23017_NUM > 0
+    mcp23017_polling_task(); // Poll MCP23017 devices
+    #endif
 }
 
 //--------------------------------------------------------------------+
@@ -285,9 +355,9 @@ static inline void compute_render()
         framebuf[i] = 0; // Clear the frame buffer
     }
 
-    for (uint grid_y = 0; grid_y < CHAR_ROWS; grid_y++)
+    for (int grid_y = CHAR_ROWS - 1; grid_y >= 0; grid_y--) // Loop through rows in reverse order
     {
-        for (uint grid_x = 0; grid_x < CHAR_COLS; grid_x++)
+        for (int grid_x = 0; grid_x < CHAR_COLS; grid_x++)
         {
             uint16_t char_pos = grid_x + (grid_y * CHAR_COLS);
             char c = grid_char[char_pos];
@@ -417,6 +487,7 @@ int __not_in_flash("main") main()
         grid_char[i] = ' ';
 
     memcpy(&grid_char[(6 * 24) + 5], "Fluffy FMC v1.0", 15);
+    memcpy(&grid_char[(7 * 24) + 5], "Connect to App", 15);
 
     // for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
     // 	grid_char[i] = (i % 10) + '0'; // Fill with numbers for testing
@@ -445,7 +516,9 @@ int __not_in_flash("main") main()
     pwm_set_enabled(slice_num, true);
 
     // I2C
+    #if MCP23017_NUM > 0
     mcp23017_init();
+    #endif
 
     // init device stack on configured roothub port
     tusb_rhport_init_t dev_init = {
@@ -462,7 +535,7 @@ int __not_in_flash("main") main()
     {
         tud_task(); // tinyusb device task
         led_blinking_task();
-        gpio_polling_task(); // Poll MCP23017 GPIOs
+        poll_task();
     }
 }
 
@@ -500,6 +573,7 @@ void tud_resume_cb(void)
 //--------------------------------------------------------------------+
 // COMMANDS
 //--------------------------------------------------------------------+
+// SET_PIXEL [x, y, count, {char, color, type}...]
 uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
     if (bufsize < 3)
         return 10;
@@ -544,15 +618,40 @@ uint set_pwm(uint8_t const *buffer, uint16_t bufsize) {
 
     return 0; // Success
 }
+
+#if MCP23017_NUM > 0
 uint set_mcp_pin(uint8_t const *buffer, uint16_t bufsize) {
     if (bufsize < 2)
         return 10; // Not enough data
 
-    // bufsize[0] contains the number of pins given
-    // bufsize[1] contains the pin number [0, 79]
+    // bufsize[0] contains the number of pin
+    // bufsize[1] contains the value
 
+    uint8_t pin = buffer[0];
+    uint8_t value = buffer[1];
 
-    
+    if (pin >= 16 * MCP23017_NUM)
+        return 11; // Invalid pin number
+
+    uint8_t mcp_index = pin / 16; // Determine which MCP23017 device
+    if (mcp23017_gpio_dir[mcp_index] & (1 << (pin % 16))) {
+        // If the pin is configured as input, we cannot set its value
+        return 12; // Pin is configured as input
+    }
+
+    uint16_t current_gpio = mcp23017_gpio[mcp_index];
+    if (value)
+        mcp23017_gpio[mcp_index] |= (1 << (pin % 16)); // Set the pin
+    else
+        mcp23017_gpio[mcp_index] &= ~(1 << (pin % 16)); // Clear the pin
+
+    int res = mcp23017_write_dual_registers(mcp23017_address[mcp_index], MCP23017_GPIOA, mcp23017_gpio[mcp_index]);
+    if (res != PICO_ERROR_NONE) {
+        mcp23017_status[mcp_index] = 3; // Error writing to MCP23017
+        return 13; // Error writing to MCP23017
+    }
+
+    return 0; // Success
 }
 uint get_mcp_pins(uint8_t const *buffer, uint16_t bufsize, uint8_t *back) {
     // if (bufsize < 1)
@@ -581,6 +680,18 @@ uint get_mcp_pins(uint8_t const *buffer, uint16_t bufsize, uint8_t *back) {
     }
     return 0; // Success
 }
+uint get_mcp_pins_masked(uint8_t const *buffer, uint16_t bufsize, uint8_t *back) {
+    for (uint8_t i = 0; i < MCP23017_NUM; ++i)
+    {
+        back[i * 2 + 0] = (mcp23017_gpio_masked[i] >> 8) & 0xFF; // High byte
+        back[i * 2 + 1] = mcp23017_gpio_masked[i] & 0xFF; // Low byte
+
+        // Reset the masked GPIO state
+        mcp23017_gpio_masked[i] = 0; // Clear the masked GPIO state
+    }
+    return 0; // Success
+}
+#endif
 
 //--------------------------------------------------------------------+
 // USB HID
@@ -619,12 +730,20 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     case 0x02:
         errNo = set_pwm(buffer + 1, bufsize - 1);
         break;
+    #if MCP23017_NUM > 0
     case 0x03:
         errNo = set_mcp_pin(buffer + 1, bufsize - 1);
         break;
     case 0x04:
         errNo = get_mcp_pins(buffer + 1, bufsize - 1, back + 1);
         break;
+    case 0x05:
+        errNo = get_mcp_pins_masked(buffer + 1, bufsize - 1, back + 1);
+        break;
+    #endif
+    // case 0xFE:
+    //     reset_usb_
+    //     break;
     default:
         errNo = 1; // Unknown command
         break;
