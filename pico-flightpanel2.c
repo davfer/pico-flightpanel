@@ -79,15 +79,15 @@ const font_t bigfont = {
 
 struct dvi_inst dvi0;
 struct semaphore dvi_start_sem;
-struct mutex copying_sem;
+struct mutex switchbuff;
 
 // Grid struct {char, color, type} for each character in the grid
 char grid_char[CHAR_COLS * CHAR_ROWS];
 char grid_color[CHAR_COLS * CHAR_ROWS];
 char grid_type[CHAR_COLS * CHAR_ROWS];
-uint8_t framebuf[CHUNKS_PER_ROW * FRAME_HEIGHT];  // 1bpp framebuffer for the DVI output
-uint8_t renderbuf[CHUNKS_PER_ROW * FRAME_HEIGHT]; // 1bpp render buffer for the DVI output
-uint8_t renderrequest = 0;                        // Flag to indicate a render request
+uint8_t renderbuf_A[CHUNKS_PER_ROW * FRAME_HEIGHT];  
+uint8_t renderbuf_B[CHUNKS_PER_ROW * FRAME_HEIGHT];
+uint8_t renderreg = 0;                       
 
 
 #if MCP23017_NUM > 0
@@ -317,6 +317,8 @@ void led_blinking_task(void);
 
 static inline void compute_char(uint dest_x, uint dest_y, char c)
 {
+    uint8_t *framebuf = (renderreg == 0) ? renderbuf_B : renderbuf_A; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+
     uint char_index = c - bigfont.first_ascii;
     for (uint y = 0; y < bigfont.char_height; ++y)
     {
@@ -347,7 +349,9 @@ static inline void compute_char(uint dest_x, uint dest_y, char c)
 
 static inline void compute_render()
 {
-    mutex_enter_blocking(&copying_sem);
+    // TODO: Render if needed
+
+    uint8_t *framebuf = (renderreg == 0) ? renderbuf_B : renderbuf_A; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
 
     // clear the frame buffer
     for (uint i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i)
@@ -398,14 +402,14 @@ static inline void compute_render()
             compute_char(charpos_x, charpos_y + marginy, c);
         }
     }
-
-    mutex_exit(&copying_sem);
-    renderrequest = 1; // Set render request flag
+    renderreg = (renderreg + 1) % 2; // Toggle between renderbuf_A and renderbuf_B
+    
     sleep_ms(10);      // Give some time for the render to be processed
 }
 
 static inline void prepare_scanline(uint y)
 {
+    uint8_t *renderbuf = (renderreg == 0) ? renderbuf_A : renderbuf_B; // If renderreg is 0, use renderbuf_A, else use renderbuf_B
     static uint8_t scanbuf[CHUNKS_PER_ROW];
     const uint16_t ypos = y * CHUNKS_PER_ROW;
 
@@ -423,29 +427,6 @@ static inline void prepare_scanline(uint y)
 void core1_scanline_callback()
 {
     static uint y = 1;
-    static uint copying = 0;
-
-    if (y == 0 && renderrequest != 0 && mutex_enter_timeout_us(&copying_sem, 1))
-    {
-        copying = 1; // We are copying the render buffer to the scanline buffer
-    }
-    if (copying)
-    {
-        // Copy the render buffer to the scanline buffer
-        const uint16_t ypos = y * CHUNKS_PER_ROW;
-        for (uint x = 0; x < CHUNKS_PER_ROW; ++x)
-        {
-            renderbuf[ypos + x] = framebuf[ypos + x];
-        }
-
-        if (y == FRAME_HEIGHT - 1)
-        {
-            renderrequest = 0;
-            copying = 0;
-            mutex_exit(&copying_sem);
-        }
-    }
-
     prepare_scanline(y);
     y = (y + 1) % FRAME_HEIGHT;
 }
@@ -482,7 +463,7 @@ int __not_in_flash("main") main()
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
-    mutex_init(&copying_sem);
+    mutex_init(&switchbuff);
     for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
         grid_char[i] = ' ';
 
@@ -492,11 +473,9 @@ int __not_in_flash("main") main()
     // for (int i = 0; i < CHAR_ROWS * CHAR_COLS; ++i)
     // 	grid_char[i] = (i % 10) + '0'; // Fill with numbers for testing
 
+    renderreg = 1; // Compute in A
     compute_render();
-    for (int i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i)
-    {
-        framebuf[i] = renderbuf[i];
-    }
+    renderreg = 0; // Render back to A (compute in B)
     prepare_scanline(0);
 
     sem_init(&dvi_start_sem, 0, 1);
