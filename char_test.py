@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 # Load the font data
-font_c_path = Path("inconsola.c")
+font_c_path = Path("inconsola_updated.c")
 font_c_content = font_c_path.read_text()
 hex_values = re.findall(r'0x[0-9A-Fa-f]+', font_c_content)
 font_bytes = [int(h, 16) for h in hex_values]
@@ -19,8 +19,8 @@ bytes_per_row = (char_width + 7) // 8
 bytes_per_char = char_height * bytes_per_row
 
 # Choose a character to edit
-target_char = 'O'
-char_index = 0x7F - first_ascii
+target_char = '_'
+char_index = ord(target_char) - first_ascii
 char_data_offset = 4 + char_index * bytes_per_char
 bitmap_data = font_bytes[4:]
 
@@ -44,12 +44,15 @@ ax.set_yticks([])
 
 def onclick(event):
     if event.inaxes != ax:
+        print("Click inside the character grid to toggle pixels.")
         return
     x, y = int(event.xdata + 0.5), int(event.ydata + 0.5)
     if 0 <= x < char_width and 0 <= y < char_height:
         char_grid[y, x] ^= 1
         img.set_data(char_grid)
         fig.canvas.draw()
+    else:
+        print(f"Click at ({x}, {y}) is out of bounds for character size {char_width}x{char_height}.")
 
 def onkey(event):
     if event.key == 'j':

@@ -635,7 +635,7 @@ uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
     for (uint8_t i = 0; i < buffer[2]; ++i)
     {
         uint8_t offset = (i * 3) + 3; // Start at 3 to skip position bytes
-        if (buffer[offset + 0] >= 0x80)
+        if (buffer[offset + 0] >= bigfont.first_ascii + bigfont.n_chars)
             return 12; // Invalid character
         if (buffer[offset + 1] >= 10)
             return 13; // Invalid color
