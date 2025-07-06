@@ -85,8 +85,13 @@ struct mutex switchbuff;
 char grid_char[CHAR_COLS * CHAR_ROWS];
 char grid_color[CHAR_COLS * CHAR_ROWS];
 char grid_type[CHAR_COLS * CHAR_ROWS];
-uint8_t renderbuf_A[CHUNKS_PER_ROW * FRAME_HEIGHT];  
-uint8_t renderbuf_B[CHUNKS_PER_ROW * FRAME_HEIGHT];
+
+uint8_t renderbuf_A_R[CHUNKS_PER_ROW * FRAME_HEIGHT];  
+uint8_t renderbuf_A_G[CHUNKS_PER_ROW * FRAME_HEIGHT];  
+uint8_t renderbuf_A_B[CHUNKS_PER_ROW * FRAME_HEIGHT];  
+uint8_t renderbuf_B_R[CHUNKS_PER_ROW * FRAME_HEIGHT];
+uint8_t renderbuf_B_G[CHUNKS_PER_ROW * FRAME_HEIGHT];
+uint8_t renderbuf_B_B[CHUNKS_PER_ROW * FRAME_HEIGHT];
 uint8_t renderreg = 0;                       
 
 
@@ -317,7 +322,9 @@ void led_blinking_task(void);
 
 static inline void compute_char(uint dest_x, uint dest_y, char c)
 {
-    uint8_t *framebuf = (renderreg == 0) ? renderbuf_B : renderbuf_A; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_R = (renderreg == 0) ? renderbuf_B_R : renderbuf_A_R; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_G = (renderreg == 0) ? renderbuf_B_G : renderbuf_A_G; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_B = (renderreg == 0) ? renderbuf_B_B : renderbuf_A_B; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
 
     uint char_index = c - bigfont.first_ascii;
     for (uint y = 0; y < bigfont.char_height; ++y)
@@ -337,11 +344,15 @@ static inline void compute_char(uint dest_x, uint dest_y, char c)
 
             if (pix == 0)
             {
-                framebuf[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+                framebuf_R[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+                // framebuf_G[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+                // framebuf_B[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
             }
             else
             {
-                framebuf[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+                framebuf_R[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+                // framebuf_G[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+                // framebuf_B[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
             }
         }
     }
@@ -351,12 +362,16 @@ static inline void compute_render()
 {
     // TODO: Render if needed
 
-    uint8_t *framebuf = (renderreg == 0) ? renderbuf_B : renderbuf_A; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_R = (renderreg == 0) ? renderbuf_B_R : renderbuf_A_R; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_G = (renderreg == 0) ? renderbuf_B_G : renderbuf_A_G; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_B = (renderreg == 0) ? renderbuf_B_B : renderbuf_A_B; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
 
     // clear the frame buffer
     for (uint i = 0; i < CHUNKS_PER_ROW * FRAME_HEIGHT; ++i)
     {
-        framebuf[i] = 0; // Clear the frame buffer
+        framebuf_R[i] = 0; // Clear the frame buffer
+        framebuf_G[i] = 0; // Clear the frame buffer
+        framebuf_B[i] = 0; // Clear the frame buffer
     }
 
     for (int grid_y = CHAR_ROWS - 1; grid_y >= 0; grid_y--) // Loop through rows in reverse order
@@ -409,18 +424,28 @@ static inline void compute_render()
 
 static inline void prepare_scanline(uint y)
 {
-    uint8_t *renderbuf = (renderreg == 0) ? renderbuf_A : renderbuf_B; // If renderreg is 0, use renderbuf_A, else use renderbuf_B
-    static uint8_t scanbuf[CHUNKS_PER_ROW];
+    uint8_t *renderbuf_R = (renderreg == 0) ? renderbuf_A_R : renderbuf_B_R; // If renderreg is 0, use renderbuf_A, else use renderbuf_B
+    uint8_t *renderbuf_G = (renderreg == 0) ? renderbuf_A_G : renderbuf_B_G; // If renderreg is 0, use renderbuf_A, else use renderbuf_B
+    uint8_t *renderbuf_B = (renderreg == 0) ? renderbuf_A_B : renderbuf_B_B; // If renderreg is 0, use renderbuf_A, else use renderbuf_B
+    static uint8_t scanbuf_R[CHUNKS_PER_ROW];
+    static uint8_t scanbuf_G[CHUNKS_PER_ROW];
+    static uint8_t scanbuf_B[CHUNKS_PER_ROW];
     const uint16_t ypos = y * CHUNKS_PER_ROW;
 
     for (uint x = 0; x < CHUNKS_PER_ROW; ++x)
     {
-        scanbuf[x] = renderbuf[ypos + x]; // Clear the scanline buffer
+        scanbuf_R[x] = renderbuf_R[ypos + x]; 
+        scanbuf_G[x] = renderbuf_G[ypos + x]; 
+        scanbuf_B[x] = renderbuf_B[ypos + x]; 
     }
 
     uint32_t *tmdsbuf;
     queue_remove_blocking(&dvi0.q_tmds_free, &tmdsbuf);
-    tmds_encode_1bpp((const uint32_t *)scanbuf, tmdsbuf, FRAME_WIDTH);
+    // tmds_encode_1bpp((const uint32_t *)scanbuf, tmdsbuf, FRAME_WIDTH);
+    tmds_encode_1bpp((const uint32_t *)scanbuf_B, tmdsbuf + 0 * (FRAME_WIDTH / DVI_SYMBOLS_PER_WORD), FRAME_WIDTH);
+    tmds_encode_1bpp((const uint32_t *)scanbuf_G, tmdsbuf + 1 * (FRAME_WIDTH / DVI_SYMBOLS_PER_WORD), FRAME_WIDTH);
+    tmds_encode_1bpp((const uint32_t *)scanbuf_R, tmdsbuf + 2 * (FRAME_WIDTH / DVI_SYMBOLS_PER_WORD), FRAME_WIDTH);
+
     queue_add_blocking(&dvi0.q_tmds_valid, &tmdsbuf);
 }
 
