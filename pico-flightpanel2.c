@@ -320,11 +320,11 @@ void led_blinking_task(void);
 
 //--------------------------------------------------------------------+
 
-static inline void compute_char(uint dest_x, uint dest_y, char c)
+static inline void compute_char(uint dest_x, uint dest_y, char c, uint8_t fg)
 {
-    uint8_t *framebuf_R = (renderreg == 0) ? renderbuf_B_R : renderbuf_A_R; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
-    uint8_t *framebuf_G = (renderreg == 0) ? renderbuf_B_G : renderbuf_A_G; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
-    uint8_t *framebuf_B = (renderreg == 0) ? renderbuf_B_B : renderbuf_A_B; // If renderreg is 0, use renderbuf_B, else use renderbuf_A
+    uint8_t *framebuf_R = (renderreg == 0) ? renderbuf_B_R : renderbuf_A_R;
+    uint8_t *framebuf_G = (renderreg == 0) ? renderbuf_B_G : renderbuf_A_G;
+    uint8_t *framebuf_B = (renderreg == 0) ? renderbuf_B_B : renderbuf_A_B;
 
     uint char_index = c - bigfont.first_ascii;
     for (uint y = 0; y < bigfont.char_height; ++y)
@@ -342,17 +342,30 @@ static inline void compute_char(uint dest_x, uint dest_y, char c)
             const uint framebuf_pos = framebuf_posy + (framebuf_posx / 8); // x7 0 , x8 1
             const uint framebuf_bit = framebuf_posx % 8;                   // b0 , b7
 
-            if (pix == 0)
+            // RED
+            if (pix == 0 || (fg & 0b00110000) == 0) // If pixel is black and red is not set
             {
                 framebuf_R[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
-                // framebuf_G[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
-                // framebuf_B[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
             }
             else
             {
                 framebuf_R[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
-                // framebuf_G[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
-                // framebuf_B[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+            }
+            if (pix == 0 || (fg & 0b00001100) == 0)
+            {
+                framebuf_G[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+            }
+            else
+            {
+                framebuf_G[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
+            }
+            if (pix == 0 || (fg & 0b00000011) == 0)
+            {
+                framebuf_B[framebuf_pos] &= ~(1 << framebuf_bit); // Clear bit (black pixel)
+            }
+            else
+            {
+                framebuf_B[framebuf_pos] |= (1 << framebuf_bit); // Set bit (white pixel)
             }
         }
     }
@@ -385,6 +398,10 @@ static inline void compute_render()
             else if (c < bigfont.first_ascii || c >= bigfont.first_ascii + bigfont.n_chars)
                 c = '?'; // Invalid character, use qustion mark
 
+            uint8_t color = grid_color[char_pos];
+            if (color >= 10) {
+                color = 0;
+            }
 
             int8_t marginy = 0;
 
@@ -412,9 +429,33 @@ static inline void compute_render()
                 c = c + 32; // Convert to lowercase for odd rows
             }
 
+            uint8_t fg = 0x00;
+            switch (color)
+            {
+            case 0: // White
+                fg = 0b00111111;
+                break;
+            case 1: // Cyan
+                fg = 0b00001111;
+                break;
+            case 2: // Green
+                fg = 0b00001100;
+                break;
+            case 3: // Magenta
+                fg = 0b00110011;
+                break;
+            case 4: // Amber
+                fg = 0b00111100;
+                break;
+            case 5: // Red
+                fg = 0b00110000;
+                break;
+            default:
+                break;
+            }
             uint16_t charpos_x = (grid_x * bigfont.char_width) + (grid_x * CHAR_MARGIN_X) + SCREEN_MARGIN_X;
             uint16_t charpos_y = (grid_y * bigfont.char_height) + (grid_y * CHAR_MARGIN_Y) + SCREEN_MARGIN_Y;
-            compute_char(charpos_x, charpos_y + marginy, c);
+            compute_char(charpos_x, charpos_y + marginy, c, fg);
         }
     }
     renderreg = (renderreg + 1) % 2; // Toggle between renderbuf_A and renderbuf_B
@@ -598,7 +639,7 @@ uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
             return 12; // Invalid character
         if (buffer[offset + 1] >= 10)
             return 13; // Invalid color
-        if (buffer[offset + 2] >= 2)
+        if (buffer[offset + 2] >= 4)
             return 14; // Invalid type
 
         grid_char[pos + i] = buffer[offset + 0];
