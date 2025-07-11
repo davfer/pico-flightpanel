@@ -1,5 +1,8 @@
+// COMMON
+#include <stdlib.h>
+#include "pico/multicore.h"
+
 // USB
-#include <stdio.h>
 #include "bsp/board.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
@@ -8,19 +11,39 @@
 #include "hardware/pwm.h"
 #include "hardware/i2c.h"
 
-// MCP23017
-#define MCP23017_I2C_ADDR 0x20 // I2C address for MCP23017
-#define MCP23017_NUM 0 // Number of MCP23017 devices
-#define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
-#define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
-#define MCP23017_POLLING_TIME 20 // GPIO pin for I2C SCL
-#if MCP23017_NUM > 0
-#include "mcp23017.h"
-#endif
+//--------------------------------------------------------------------+
+// MACRO CONSTANT TYPEDEF PROTYPES
+//--------------------------------------------------------------------+
+
+/* Blink pattern
+ * - 250 ms  : device not mounted
+ * - 1000 ms : device mounted
+ * - 2500 ms : device is suspended
+ */
+enum
+{
+    BLINK_FAIL = 100,
+    BLINK_NOT_MOUNTED = 250,
+    BLINK_MOUNTED = 1000,
+    BLINK_SUSPENDED = 2500,
+    LED_OFF = 0,
+    LED_ON = UINT32_MAX,
+};
+
+static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
+
+void led_blinking_task(void);
+
+//--------------------------------------------------------------------+
+
+// PWM
+#define PWM_PIN 2
+#define PWM_FREQ 1000
 
 // DVI
-#include <stdlib.h>
-#include "pico/multicore.h"
+#define CDU_SCREEN_INSTALLED 0
+
+#if CDU_SCREEN_INSTALLED
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
 #include "hardware/sync.h"
@@ -36,9 +59,6 @@
 #include "tmds_encode.h"
 
 #include "inconsola.c"
-
-#define PWM_PIN 2
-#define PWM_FREQ 1000
 
 #define CHAR_COLS 24
 #define CHAR_ROWS 14
@@ -93,9 +113,19 @@ uint8_t renderbuf_B_R[CHUNKS_PER_ROW * FRAME_HEIGHT];
 uint8_t renderbuf_B_G[CHUNKS_PER_ROW * FRAME_HEIGHT];
 uint8_t renderbuf_B_B[CHUNKS_PER_ROW * FRAME_HEIGHT];
 uint8_t renderreg = 0;                       
+#endif
 
+// MCP23017
+#define MCP23017_NUM 0 // Number of MCP23017 devices
 
 #if MCP23017_NUM > 0
+#define MCP23017_I2C_ADDR 0x20 // I2C address for MCP23017
+#define MCP23017_I2C_SDA_PIN 0 // GPIO pin for I2C SDA
+#define MCP23017_I2C_SCL_PIN 1 // GPIO pin for I2C SCL
+#define MCP23017_POLLING_TIME 20 // GPIO pin for I2C SCL
+
+#include "mcp23017.h"
+
 //--------------------------------------------------------------------+
 // I2C MCP23017
 //--------------------------------------------------------------------+
@@ -284,6 +314,103 @@ void mcp23017_polling_task(void)
 
 #endif
 
+// TM1637
+#define TM1637_NUM 1 // Number of TM1637 devices
+
+#if TM1637_NUM > 0
+#include <hardware/clocks.h>
+#include "tm1637.pio.h"
+#define TM1637_POLLING_TIME 1000 // Polling time in milliseconds
+
+const uint8_t digit_to_segment[] = {
+  0b00111111,    // 0
+  0b00000110,    // 1
+  0b01011011,    // 2
+  0b01001111,    // 3
+  0b01100110,    // 4
+  0b01101101,    // 5
+  0b01111101,    // 6
+  0b00000111,    // 7
+  0b01111111,    // 8
+  0b01101111,    // 9
+  0b01110111,    // A
+  0b01111100,    // b
+  0b00111001,    // C
+  0b01011110,    // d
+  0b01111001,    // E
+  0b01110001,     // F
+    0b00000000, // Blank
+    0b00000001, // -
+};
+const uint8_t tm1637_SCLSDA_pins[TM1637_NUM*2] = {
+    27, 26,
+};
+const uint8_t tm1637_num_chars[TM1637_NUM] = {
+    6,
+};
+uint8_t tm1637_digits[TM1637_NUM][6] = {
+    { digit_to_segment[1], digit_to_segment[2], digit_to_segment[3], digit_to_segment[4], digit_to_segment[5], digit_to_segment[6] }
+};
+uint8_t tm1637_layout[TM1637_NUM][6] = {
+    { 3, 0, 1, 4, 5, 2 }
+};
+
+void tm1637_write_digits(PIO pio, uint sm, const uint8_t * digits, uint8_t ndigits) {
+    pio_sm_restart(pio, sm);
+    uint32_t data;
+    for (uint8_t i = 0; i < (ndigits + 1) / 2; ++i) {
+        if (i == 0) {
+            data = (0xC0 << 8) + 0x40;
+        } else {
+            data = 0;
+        }
+
+        data |= digits[i*2] << 24;
+        if ((i*2) + 1 < ndigits) {
+            data |= digits[(i*2) + 1] << 16;
+        }
+        pio_sm_put_blocking(pio, sm, data);
+    }
+
+    while (!pio_sm_is_tx_fifo_empty(pio, sm)) {
+        tight_loop_contents(); // Wait until the TX FIFO is empty
+    }
+}
+
+void tm16377_init(void)
+{
+    for (int i = 0; i < TM1637_NUM; ++i) {
+        uint offset = pio_add_program(pio0, &tm1637_program);
+        tm1637_program_init(pio0, i, offset, tm1637_SCLSDA_pins[i * 2], tm1637_SCLSDA_pins[i * 2 + 1]);
+
+        // Init display and brightness
+        pio_sm_put_blocking(pio0, i, 0x88 + 0b00000111); // Set brightness to max (0x8f = display on + brightness 7)
+        while (!pio_sm_is_tx_fifo_empty(pio0, i)) {
+            tight_loop_contents(); // Wait until the TX FIFO is empty
+        }
+    }
+}
+
+void tm1637_polling_task(void)
+{
+    static uint32_t poll_ms = 0;
+    if (board_millis() - poll_ms < TM1637_POLLING_TIME)
+        return; // not enough time
+    poll_ms += TM1637_POLLING_TIME;
+
+    static uint16_t display = 0;
+
+    const uint8_t ndigits = tm1637_num_chars[display];
+    uint8_t digits[ndigits];
+    for (uint8_t i = 0; i < ndigits; ++i) {
+        digits[tm1637_layout[display][i]] = tm1637_digits[display][i];
+    }
+    tm1637_write_digits(pio0, 0, digits, ndigits);
+
+    display = (display + 1) % TM1637_NUM; // Cycle through displays
+}
+#endif
+
 //--------------------------------------------------------------------+
 // POLLING
 //--------------------------------------------------------------------+
@@ -293,33 +420,12 @@ void poll_task(void)
     #if MCP23017_NUM > 0
     mcp23017_polling_task(); // Poll MCP23017 devices
     #endif
+    #if TM1637_NUM > 0
+    tm1637_polling_task(); // Poll TM1637 devices
+    #endif
 }
 
-//--------------------------------------------------------------------+
-// MACRO CONSTANT TYPEDEF PROTYPES
-//--------------------------------------------------------------------+
-
-/* Blink pattern
- * - 250 ms  : device not mounted
- * - 1000 ms : device mounted
- * - 2500 ms : device is suspended
- */
-enum
-{
-    BLINK_FAIL = 100,
-    BLINK_NOT_MOUNTED = 250,
-    BLINK_MOUNTED = 1000,
-    BLINK_SUSPENDED = 2500,
-    LED_OFF = 0,
-    LED_ON = UINT32_MAX,
-};
-
-static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
-
-void led_blinking_task(void);
-
-//--------------------------------------------------------------------+
-
+#if CDU_SCREEN_INSTALLED
 static inline void compute_char(uint dest_x, uint dest_y, char c, uint8_t fg)
 {
     uint8_t *framebuf_R = (renderreg == 0) ? renderbuf_B_R : renderbuf_A_R;
@@ -496,33 +602,38 @@ void core1_scanline_callback()
     prepare_scanline(y);
     y = (y + 1) % FRAME_HEIGHT;
 }
+#endif // CDU_SCREEN_INSTALLED
 
+//--------------------------------------------------------------------+
 void __not_in_flash("main") core1_main()
 {
+    #if CDU_SCREEN_INSTALLED
     dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     sem_acquire_blocking(&dvi_start_sem);
     dvi_start(&dvi0);
+    #endif // CDU_SCREEN_INSTALLED
 
     // The text display is completely IRQ driven (takes up around 30% of cycles @
     // VGA). We could do something useful, or we could just take a nice nap
     while (1) {
+        #if CDU_SCREEN_INSTALLED
         compute_render();
-        // tus_task(); // tinyusb device task
+        #endif // CDU_SCREEN_INSTALLED
     }
-        
     __builtin_unreachable();
 }
 
 int __not_in_flash("main") main()
 {
+    #if CDU_SCREEN_INSTALLED
     vreg_set_voltage(VREG_VSEL);
     sleep_ms(10);
-#ifdef RUN_FROM_CRYSTAL
+    #ifdef RUN_FROM_CRYSTAL
     set_sys_clock_khz(12000, true);
-#else
+    #else
     // Run system at TMDS bit clock
     set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
-#endif
+    #endif
 
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
@@ -549,6 +660,9 @@ int __not_in_flash("main") main()
     multicore_launch_core1(core1_main);
 
     sem_release(&dvi_start_sem);
+    #else
+    multicore_launch_core1(core1_main);
+    #endif // CDU_SCREEN_INSTALLED
 
     // USB
     board_init();
@@ -563,6 +677,9 @@ int __not_in_flash("main") main()
     // I2C
     #if MCP23017_NUM > 0
     mcp23017_init();
+    #endif
+    #if TM1637_NUM > 0
+    tm16377_init();
     #endif
 
     // init device stack on configured roothub port
@@ -618,6 +735,7 @@ void tud_resume_cb(void)
 //--------------------------------------------------------------------+
 // COMMANDS
 //--------------------------------------------------------------------+
+#if CDU_SCREEN_INSTALLED
 // SET_PIXEL [x, y, count, {char, color, type}...]
 uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
     if (bufsize < 3)
@@ -649,6 +767,10 @@ uint set_pixels(uint8_t const *buffer, uint16_t bufsize) {
 
     return 0;
 }
+#endif // CDU_SCREEN_INSTALLED
+
+
+// SET_PWM [duty_cycle]
 uint set_pwm(uint8_t const *buffer, uint16_t bufsize) {
     if (bufsize < 1)
         return 10;
@@ -769,9 +891,11 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     uint8_t errNo = 0;
     switch (buffer[0])
     {
+    #if CDU_SCREEN_INSTALLED
     case 0x01:
         errNo = set_pixels(buffer + 1, bufsize - 1);
         break;
+    #endif // CDU_SCREEN_INSTALLED
     case 0x02:
         errNo = set_pwm(buffer + 1, bufsize - 1);
         break;

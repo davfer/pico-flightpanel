@@ -45,6 +45,7 @@ pico_set_program_version(pico-flightpanel2 "0.1")
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(pico-flightpanel2 0)
 pico_enable_stdio_usb(pico-flightpanel2 0)
+pico_generate_pio_header(pico-flightpanel2 ${CMAKE_CURRENT_LIST_DIR}/tm1637.pio)
 
 # Add the standard library to the build
 target_link_libraries(pico-flightpanel2
@@ -54,6 +55,7 @@ target_link_libraries(pico-flightpanel2
 	    pico_util
         hardware_i2c
         hardware_pwm
+        hardware_pio
         tinyusb_device 
         tinyusb_board
         libdvi)
